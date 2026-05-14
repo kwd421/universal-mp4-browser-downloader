@@ -114,7 +114,7 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(engine.display_duration(3661), "1:01:01")
 
     def test_clean_video_title_removes_trailing_domain_suffix(self):
-        self.assertEqual(engine.clean_video_title("Good Video - Pornhub.com"), "Good Video")
+        self.assertEqual(engine.clean_video_title("Good Video - videosite.example"), "Good Video")
         self.assertEqual(engine.clean_video_title("Good Video | example.net"), "Good Video")
         self.assertEqual(engine.clean_video_title("Good Video - Creator Name"), "Good Video - Creator Name")
         self.assertEqual(engine.clean_video_title(""), "")
@@ -295,7 +295,7 @@ class DownloaderEngineTests(unittest.TestCase):
         candidate = {
             "format_selector": "best",
             "output_ext": "mp4",
-            "display_title": "Actual Video Title - Pornhub.com",
+            "display_title": "Actual Video Title - videosite.example",
             "title": "master",
             "format_id": "master",
             "url": "https://cdn.example.test/master.m3u8",
@@ -305,7 +305,7 @@ class DownloaderEngineTests(unittest.TestCase):
 
         filename = Path(options["outtmpl"]).name
         self.assertEqual(filename, "Actual Video Title.%(ext)s")
-        self.assertNotIn("Pornhub", filename)
+        self.assertNotIn("videosite", filename)
         self.assertNotIn("master", filename)
 
     def test_effective_proxy_prefers_explicit_then_environment_then_windows(self):
@@ -374,9 +374,9 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(result["candidates"][0]["format_selector"], "best")
         self.assertEqual(result["candidates"][0]["thumbnail"], "https://img.example.test/thumb.jpg")
 
-    def test_browser_dom_player_scripts_extract_xvideos_style_candidates(self):
+    def test_browser_dom_player_scripts_extract_embedded_player_candidates(self):
         html = """
-        <html><head><title>Script Video - xvideos.com</title></head><body>
+        <html><head><title>Script Video - videosite.example</title></head><body>
         <script>
           html5player.setVideoUrlLow('https://mp4.example.test/path/video_240p.mp4?secure=low');
           html5player.setVideoUrlHigh('https://mp4.example.test/path/video_360p.mp4?secure=high');
@@ -386,7 +386,7 @@ class DownloaderEngineTests(unittest.TestCase):
         """
 
         result = engine.analyze_browser_dom_media(
-            "https://www.xvideos.com/video123/example",
+            "https://www.videosite.example/video123/example",
             html,
             output_ext="MP4",
         )
@@ -397,8 +397,8 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(result["candidates"][0]["url"], "https://mp4.example.test/path/video_360p.mp4?secure=high")
         self.assertEqual(result["candidates"][0]["height"], 360)
         self.assertFalse(result["candidates"][0]["is_manifest"])
-        self.assertEqual(result["candidates"][0]["referer"], "https://www.xvideos.com/video123/example")
-        self.assertEqual(result["candidates"][0]["origin"], "https://www.xvideos.com")
+        self.assertEqual(result["candidates"][0]["referer"], "https://www.videosite.example/video123/example")
+        self.assertEqual(result["candidates"][0]["origin"], "https://www.videosite.example")
         self.assertEqual(result["candidates"][0]["thumbnail"], "https://thumb.example.test/thumb.jpg")
         self.assertTrue(result["candidates"][2]["is_manifest"])
 

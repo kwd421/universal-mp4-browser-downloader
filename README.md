@@ -8,7 +8,7 @@ URL을 붙여넣으면 yt-dlp로 영상 후보를 분석하고, 원하는 품질
 - 후보는 썸네일, 제목, 길이, 확장자, 품질, 예상 크기를 보여줍니다.
 - Chrome, Edge, Firefox 쿠키 읽기 옵션을 지원합니다.
 - 일반 추출이 TLS/브라우저 지문 문제로 실패하면 설치된 Chrome/Edge/Chromium의 headless DOM 분석 fallback을 사용합니다.
-- 다운로드 파일명은 UI에 보이는 영상 제목을 기준으로 만들고, `pornhub.com` 같은 trailing 도메인 꼬리는 제거합니다.
+- 다운로드 파일명은 UI에 보이는 영상 제목을 기준으로 만들고, trailing 도메인 꼬리는 제거합니다.
 - DRM, CAPTCHA, 유료/비공개 권한 우회는 하지 않습니다.
 
 ## Windows 빌드
@@ -37,7 +37,7 @@ bash build-helper/build_macos.sh
 - `dist/UniversalMP4BrowserDownloader`
 - `dist/UniversalMP4BrowserDownloader.app`
 
-macOS에서 PornHub류 TLS/브라우저 지문 fallback까지 쓰려면 Chrome, Edge, 또는 Chromium 중 하나가 설치되어 있어야 합니다. 직접 경로를 지정하려면 `UMP4_BROWSER_PATH` 환경변수를 사용하세요.
+macOS에서 TLS/브라우저 지문 fallback까지 쓰려면 Chrome, Edge, 또는 Chromium 중 하나가 설치되어 있어야 합니다. 직접 경로를 지정하려면 `UMP4_BROWSER_PATH` 환경변수를 사용하세요.
 
 ## 개발 검증
 
