@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QPainter, QPen
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QLinearGradient, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -537,6 +537,41 @@ class ActionIconButton(QToolButton):
         super().leaveEvent(event)
 
 
+class ThumbnailBox(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ThumbBox")
+        self.setFixedSize(96, 54)
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        gradient.setColorAt(0.0, QColor("#eef4fb"))
+        gradient.setColorAt(0.55, QColor("#e1eaf4"))
+        gradient.setColorAt(1.0, QColor("#d8e2ef"))
+
+        painter.setPen(QPen(QColor("#d6e1ef"), 1))
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(rect, 6, 6)
+
+        painter.setPen(QPen(QColor("#cfdae8"), 1))
+        for y in (15, 31, 47):
+            painter.drawLine(QPointF(8, y), QPointF(88, y - 13))
+
+        painter.setBrush(QColor("#8fa2ba"))
+        painter.setPen(Qt.NoPen)
+        center = QPointF(self.width() / 2 + 2, self.height() / 2)
+        triangle = QPolygonF([
+            QPointF(center.x() - 6, center.y() - 8),
+            QPointF(center.x() - 6, center.y() + 8),
+            QPointF(center.x() + 8, center.y()),
+        ])
+        painter.drawPolygon(triangle)
+
+
 class AnalyzeWorker(QObject):
     event = Signal(dict)
     finished = Signal(dict)
@@ -611,15 +646,7 @@ class DownloadRowWidget(QFrame):
         outer.setContentsMargins(12, 5, 12, 5)
         outer.setSpacing(10)
 
-        self.thumbnail = QFrame()
-        self.thumbnail.setObjectName("ThumbBox")
-        self.thumbnail.setFixedSize(96, 54)
-        thumb_layout = QVBoxLayout(self.thumbnail)
-        thumb_layout.setContentsMargins(0, 0, 0, 0)
-        thumb_icon = QLabel("▶")
-        thumb_icon.setAlignment(Qt.AlignCenter)
-        thumb_icon.setStyleSheet("color: #8ba0ba; font-size: 18px;")
-        thumb_layout.addWidget(thumb_icon)
+        self.thumbnail = ThumbnailBox()
         outer.addWidget(self.thumbnail)
 
         self.item_widget = QWidget()
