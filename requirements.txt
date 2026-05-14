@@ -1,0 +1,8 @@
+yt-dlp==2026.3.17
+yt-dlp-ejs==0.8.0
+imageio==2.37.2
+imageio-ffmpeg==0.6.0
+pillow==11.3.0
+curl_cffi==0.14.0
+pyinstaller==6.20.0
+pyinstaller-hooks-contrib==2026.5
