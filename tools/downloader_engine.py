@@ -305,6 +305,8 @@ def enrich_missing_sizes(candidates, size_probe=http_content_length, limit=SIZE_
     for candidate in candidates:
         if safe_int(candidate.get("sort_bytes")):
             continue
+        if candidate.get("is_manifest") or is_manifest_format(candidate):
+            continue
         if checked >= limit:
             break
         checked += 1
@@ -571,6 +573,35 @@ def is_manifest_format(fmt):
     return "m3u8" in protocol or "dash" in protocol or ".m3u8" in url or ".mpd" in url
 
 
+def bitrate_duration_size(fmt, duration=0):
+    bitrate_kbps = safe_int(fmt.get("tbr") or fmt.get("vbr") or fmt.get("abr"))
+    seconds = safe_int(fmt.get("duration") or duration)
+    if not bitrate_kbps or not seconds:
+        return 0
+    return int(bitrate_kbps * 1000 * seconds / 8)
+
+
+def media_size_for_format(fmt, duration=0, extra_size=0):
+    if is_manifest_format(fmt):
+        estimated = bitrate_duration_size(fmt, duration)
+        if estimated:
+            return estimated + safe_int(extra_size), "bitrate"
+        return 0, "unknown"
+
+    declared = safe_int(fmt.get("filesize") or fmt.get("filesize_approx"))
+    if declared:
+        return declared + safe_int(extra_size), "metadata"
+    return 0, "unknown"
+
+
+def candidate_filesize_fields(fmt, sort_bytes=0, size_source="unknown"):
+    if is_manifest_format(fmt):
+        if size_source == "bitrate":
+            return 0, safe_int(sort_bytes)
+        return 0, 0
+    return safe_int(fmt.get("filesize")), safe_int(fmt.get("filesize_approx"))
+
+
 def candidates_from_info(info, output_ext=None):
     requested_ext = normalized_output_ext(output_ext)
     candidates = []
@@ -590,7 +621,8 @@ def candidates_from_info(info, output_ext=None):
             if requested_ext == "wav":
                 if not is_audio_format(fmt):
                     continue
-                size = safe_int(fmt.get("filesize") or fmt.get("filesize_approx"))
+                size, size_source = media_size_for_format(fmt, duration)
+                filesize, filesize_approx = candidate_filesize_fields(fmt, size, size_source)
                 source = video_info.get("webpage_url") or video_info.get("original_url") or info.get("webpage_url") or ""
                 key = (source, "wav", format_id, fmt.get("url"))
                 if key in seen:
@@ -614,10 +646,10 @@ def candidates_from_info(info, output_ext=None):
                         "fps": 0,
                         "vcodec": "none",
                         "acodec": acodec,
-                        "filesize": safe_int(fmt.get("filesize")),
-                        "filesize_approx": safe_int(fmt.get("filesize_approx")),
+                        "filesize": filesize,
+                        "filesize_approx": filesize_approx,
                         "sort_bytes": size,
-                        "size_source": "metadata" if size else "unknown",
+                        "size_source": size_source,
                         "source": source,
                         "protocol": format_protocol(fmt),
                         "is_manifest": is_manifest_format(fmt),
@@ -633,11 +665,11 @@ def candidates_from_info(info, output_ext=None):
             if not has_video or vcodec.lower() == "none":
                 continue
 
-            base_size = safe_int(fmt.get("filesize") or fmt.get("filesize_approx"))
             audio_size = 0
             if acodec.lower() == "none" and audio:
-                audio_size = safe_int(audio.get("filesize") or audio.get("filesize_approx"))
-            sort_bytes = base_size + audio_size if base_size else 0
+                audio_size, _audio_size_source = media_size_for_format(audio, duration)
+            sort_bytes, size_source = media_size_for_format(fmt, duration, audio_size)
+            filesize, filesize_approx = candidate_filesize_fields(fmt, sort_bytes, size_source)
             selector = format_id or "best"
             if acodec.lower() == "none":
                 selector = f"{selector}+bestaudio[ext=m4a]/bestaudio/best"
@@ -666,10 +698,10 @@ def candidates_from_info(info, output_ext=None):
                     "fps": safe_int(fmt.get("fps")),
                     "vcodec": vcodec,
                     "acodec": acodec,
-                    "filesize": safe_int(fmt.get("filesize")),
-                    "filesize_approx": safe_int(fmt.get("filesize_approx")),
+                    "filesize": filesize,
+                    "filesize_approx": filesize_approx,
                     "sort_bytes": sort_bytes,
-                    "size_source": "metadata" if sort_bytes else "unknown",
+                    "size_source": size_source,
                     "source": source,
                     "protocol": format_protocol(fmt),
                     "is_manifest": is_manifest_format(fmt),
@@ -684,7 +716,8 @@ def candidates_from_info(info, output_ext=None):
             direct_ext = str(video_info.get("ext") or "unknown").lower()
             if requested_ext and direct_ext != requested_ext:
                 continue
-            size = safe_int(video_info.get("filesize") or video_info.get("filesize_approx"))
+            size, size_source = media_size_for_format(video_info, duration)
+            filesize, filesize_approx = candidate_filesize_fields(video_info, size, size_source)
             candidates.append(
                 {
                     "id": f"{len(candidates) + 1}",
@@ -703,10 +736,10 @@ def candidates_from_info(info, output_ext=None):
                     "fps": safe_int(video_info.get("fps")),
                     "vcodec": str(video_info.get("vcodec") or "unknown"),
                     "acodec": str(video_info.get("acodec") or "unknown"),
-                    "filesize": safe_int(video_info.get("filesize")),
-                    "filesize_approx": safe_int(video_info.get("filesize_approx")),
+                    "filesize": filesize,
+                    "filesize_approx": filesize_approx,
                     "sort_bytes": size,
-                    "size_source": "metadata" if size else "unknown",
+                    "size_source": size_source,
                     "source": video_info.get("webpage_url") or video_info["url"],
                     "protocol": format_protocol(video_info),
                     "is_manifest": is_manifest_format(video_info),

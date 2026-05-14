@@ -173,6 +173,53 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(candidates[0]["filesize_approx"], 321_000)
         self.assertEqual(candidates[0]["size_source"], "http")
 
+    def test_manifest_sizes_are_not_filled_from_playlist_content_length(self):
+        candidates = [
+            {
+                "id": "1",
+                "url": "https://cdn.example.test/master.m3u8",
+                "sort_bytes": 0,
+                "filesize": 0,
+                "filesize_approx": 0,
+                "is_manifest": True,
+            }
+        ]
+
+        engine.enrich_missing_sizes(candidates, size_probe=lambda url: 22_600)
+
+        self.assertEqual(candidates[0]["sort_bytes"], 0)
+        self.assertEqual(candidates[0]["filesize_approx"], 0)
+        self.assertNotEqual(candidates[0].get("size_source"), "http")
+
+    def test_manifest_candidates_prefer_bitrate_duration_estimate_over_playlist_size(self):
+        info = {
+            "id": "hls-sample",
+            "title": "HLS Sample",
+            "duration": 446,
+            "webpage_url": "https://example.test/watch",
+            "formats": [
+                {
+                    "format_id": "hls-3049-1",
+                    "ext": "mp4",
+                    "protocol": "m3u8_native",
+                    "url": "https://cdn.example.test/master.m3u8",
+                    "height": 1080,
+                    "width": 1920,
+                    "tbr": 3049,
+                    "vcodec": "avc1.640028",
+                    "acodec": "mp4a.40.2",
+                    "filesize": 22_600,
+                    "format_note": "1920x1080",
+                }
+            ],
+        }
+
+        candidates = engine.candidates_from_info(info, output_ext="MP4")
+
+        self.assertEqual(candidates[0]["sort_bytes"], 169_981_750)
+        self.assertEqual(candidates[0]["size_source"], "bitrate")
+        self.assertEqual(engine.display_size(candidates[0]["sort_bytes"]), "162.1 MB")
+
     def test_cookie_source_maps_to_yt_dlp_options(self):
         self.assertNotIn("cookiesfrombrowser", engine.build_ydl_options(cookie_source="없음"))
         self.assertEqual(engine.build_ydl_options(cookie_source="Chrome")["cookiesfrombrowser"], ("chrome",))
