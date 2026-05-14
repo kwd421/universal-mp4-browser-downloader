@@ -45,6 +45,7 @@ print(hasattr(window, "cookie_help_button"))
 print(hasattr(window, "row_container"))
 print("Noto Sans KR" in window.styleSheet())
 print("|".join(label.text() for label in window.header_labels))
+print(window.windowIcon().isNull())
 '''
         result = run_qt_script(script)
 
@@ -61,6 +62,7 @@ print("|".join(label.text() for label in window.header_labels))
                 "True",
                 "True",
                 "영상|품질|포맷|길이|크기|상태|작업",
+                "False",
             ],
         )
 

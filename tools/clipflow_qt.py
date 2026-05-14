@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QLinearGradient, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QLinearGradient, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -255,6 +255,27 @@ def configure_app_font(app):
         if Path(font_path).exists():
             QFontDatabase.addApplicationFont(font_path)
     app.setFont(QFont("Noto Sans KR", 10))
+
+
+def create_app_icon(size=64):
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+
+    rect = QRectF(4, 4, size - 8, size - 8)
+    gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+    gradient.setColorAt(0.0, QColor("#38bdf8"))
+    gradient.setColorAt(1.0, QColor("#2563eb"))
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(gradient)
+    painter.drawRoundedRect(rect, 14, 14)
+
+    painter.setPen(QColor("#ffffff"))
+    painter.setFont(QFont("Noto Sans KR", max(12, int(size * 0.34)), QFont.Bold))
+    painter.drawText(rect, Qt.AlignCenter, "Cf")
+    painter.end()
+    return QIcon(pixmap)
 
 
 def source_domain(url):
@@ -951,6 +972,7 @@ class ClipFlowWindow(QMainWindow):
         self.event_messages = []
         self._clear_url_on_next_click = False
         self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(create_app_icon())
         self.resize(1080, 1280)
         self.setMinimumSize(860, 640)
         self.setStyleSheet(APP_STYLE)
