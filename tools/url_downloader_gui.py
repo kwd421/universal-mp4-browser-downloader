@@ -119,8 +119,12 @@ def candidate_group_key(candidate):
 
 
 def candidate_quality_key(candidate):
+    vcodec = str(candidate.get("vcodec") or "").lower()
+    acodec = str(candidate.get("acodec") or "").lower()
     return (
         engine.safe_int(candidate.get("height")),
+        1 if vcodec.startswith(("avc", "h264")) else 0,
+        1 if acodec.startswith(("mp4a", "aac")) else 0,
         engine.safe_int(candidate.get("sort_bytes")),
         engine.safe_int(candidate.get("fps")),
     )
@@ -134,7 +138,6 @@ def candidate_visible_quality_key(candidate):
     return (
         "video",
         ext,
-        candidate.get("resolution") or "",
         engine.safe_int(candidate.get("height")),
         engine.safe_int(candidate.get("fps")),
     )
@@ -151,8 +154,8 @@ def quality_label(candidate):
 
 
 def filter_manifest_duplicates(candidates):
-    has_direct = any(not candidate.get("is_manifest") for candidate in candidates)
-    if not has_direct:
+    has_sized_direct = any(not candidate.get("is_manifest") and engine.safe_int(candidate.get("sort_bytes")) > 0 for candidate in candidates)
+    if not has_sized_direct:
         return candidates
     filtered = []
     for candidate in candidates:
