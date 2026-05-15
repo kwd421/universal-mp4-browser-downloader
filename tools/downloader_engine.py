@@ -246,7 +246,7 @@ def looks_like_playlist_url(url):
     parsed = urllib.parse.urlparse(str(url or ""))
     path = parsed.path.lower()
     query = urllib.parse.parse_qs(parsed.query)
-    if "list" in query and not path.endswith("/watch"):
+    if any(str(value or "").strip() for value in query.get("list", [])):
         return True
     return "playlist" in path
 

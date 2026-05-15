@@ -336,6 +336,7 @@ class DownloadRowWidget(QFrame):
         self.row["expanded"] = not bool(self.row.get("expanded"))
         self._refresh_playlist_detail()
         self.updateGeometry()
+        self.owner.playlist_expansion_changed(self.row)
 
     def _position_actions(self):
         width = self.actions_widget.width()

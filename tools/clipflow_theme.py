@@ -3,8 +3,8 @@ from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QLinearGradient, 
 
 APP_NAME = "ClipFlow"
 DEFAULT_OUTPUT_EXT = "MP4"
-COOKIE_CHOICES = ["없음", "Chrome", "Edge", "Firefox"]
-COOKIE_DISPLAY_CHOICES = [f"쿠키: {choice}" for choice in COOKIE_CHOICES]
+COOKIE_CHOICES = ["없음", "Chrome", "Firefox", "Edge"]
+COOKIE_DISPLAY_CHOICES = ["쿠키 미사용", "Chrome", "Firefox", "Edge"]
 TOP_FIELD_HEIGHT = 42
 PRIMARY_BUTTON_WIDTH = 150
 THUMBNAIL_WIDTH = 96
@@ -87,6 +87,18 @@ QToolButton#HelpButton:hover {
 QToolButton#ActionButton {
     color: #243b5a;
     font-size: 15px;
+}
+QPushButton#FloatingButton {
+    background: #ffffff;
+    color: #1d4ed8;
+    border: 1px solid #bfd0e6;
+    border-radius: 15px;
+    padding: 5px 12px;
+    font-weight: 700;
+}
+QPushButton#FloatingButton:hover {
+    background: #edf4ff;
+    border-color: #93b4e8;
 }
 QLabel {
     color: #1f2937;

@@ -357,6 +357,11 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertFalse(options["noplaylist"])
         self.assertIn("playlist_index", output_template.name)
 
+    def test_watch_urls_with_list_query_are_treated_as_playlist_links(self):
+        self.assertTrue(engine.looks_like_playlist_url("https://video.example/watch?v=one&list=RDone&index=1"))
+        self.assertTrue(engine.looks_like_playlist_url("https://video.example/watch?v=one&list=PL123"))
+        self.assertFalse(engine.looks_like_playlist_url("https://video.example/watch?v=one"))
+
     def test_effective_proxy_prefers_explicit_then_environment_then_windows(self):
         self.assertEqual(
             engine.effective_proxy_url(

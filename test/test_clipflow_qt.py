@@ -156,7 +156,7 @@ print(window.windowIcon().isNull())
                 "False",
                 "False",
                 "붙여넣기",
-                "쿠키: 없음",
+                "쿠키 미사용",
                 "False",
                 "True",
                 "True",
@@ -308,7 +308,7 @@ QSettings(SETTINGS_ORG, SETTINGS_APP).clear()
 
 app = QApplication([])
 window = ClipFlowWindow()
-window.cookie_combo.setCurrentText("쿠키: Firefox")
+window.cookie_combo.setCurrentText("Firefox")
 second = ClipFlowWindow()
 
 print(second.cookie_combo.currentText())
@@ -317,7 +317,7 @@ settings_dir.cleanup()
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["쿠키: Firefox"])
+        self.assertEqual(result.stdout.splitlines(), ["Firefox"])
 
     def test_clipflow_qt_completed_download_history_persists_until_removed(self):
         script = r'''
@@ -892,7 +892,7 @@ print(hasattr(window, "cookie_help_button"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["42", "42", "찾아보기", "True", "True", "150", "False"],
+            ["42", "42", "저장 위치", "True", "True", "150", "False"],
         )
 
     def test_clipflow_qt_folder_path_is_display_only(self):
@@ -1360,6 +1360,71 @@ app.exec()
                 "[['https://media.test/playlist/road', 'playlist', 'Road Trip Mix']]",
             ],
         )
+
+    def test_clipflow_qt_playlist_float_button_collapses_and_returns_to_row(self):
+        script = r'''
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://media.test/playlist/long"
+
+def fake_analysis():
+    candidates = []
+    for index in range(1, 41):
+        candidates.append({
+            "id": str(index),
+            "source": f"https://media.test/watch/{index}",
+            "url": f"https://media.test/watch/{index}",
+            "title": f"Video {index}",
+            "display_title": f"Video {index}",
+            "thumbnail": "",
+            "ext": "mp4",
+            "output_ext": "mp4",
+            "resolution": "1080p",
+            "height": 1080,
+            "duration": 60,
+            "sort_bytes": 10,
+        })
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Long Mix",
+        "playlist_title": "Long Mix",
+        "is_playlist": True,
+        "playlist_count": len(candidates),
+        "candidates": candidates,
+        "warnings": [],
+    }
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(720, 420)
+window.show()
+app.processEvents()
+window.url_input.setText(url)
+window._analysis_finished(fake_analysis())
+row = window.rows[0]
+row_widget = row["widget"]
+row_widget.playlist_toggle_button.click()
+app.processEvents()
+bar = window.scroll_area.verticalScrollBar()
+bar.setValue(min(bar.maximum(), 90))
+app.processEvents()
+window._refresh_playlist_float_button()
+print(row["expanded"])
+print(bar.maximum() > 0)
+print(window.playlist_float_button.isVisible())
+window.playlist_float_button.click()
+app.processEvents()
+row_top = row_widget.mapTo(window.row_container, QPoint(0, 0)).y()
+print(row["expanded"])
+print(abs(bar.value() - row_top) <= 2)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "False", "True"])
 
     def test_clipflow_qt_long_titles_use_marquee_label(self):
         script = r'''

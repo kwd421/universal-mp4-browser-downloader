@@ -4,7 +4,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QPoint, QSettings, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -65,6 +65,8 @@ PREFERENCE_DEFAULTS = {
 }
 SORT_LABELS = {"latest": "최신순", "name": "이름순"}
 SORT_KEYS_BY_LABEL = {label: key for key, label in SORT_LABELS.items()}
+COOKIE_DISPLAY_TO_SOURCE = dict(zip(COOKIE_DISPLAY_CHOICES, COOKIE_CHOICES))
+COOKIE_SOURCE_TO_DISPLAY = dict(zip(COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES))
 
 
 def default_save_folder():
@@ -86,6 +88,8 @@ def local_file_url(path):
 
 def cookie_source_from_display(display_text):
     text = str(display_text or "").strip()
+    if text in COOKIE_DISPLAY_TO_SOURCE:
+        return COOKIE_DISPLAY_TO_SOURCE[text]
     if text.startswith("쿠키:"):
         text = text.split(":", 1)[1].strip()
     return text or "없음"
@@ -304,6 +308,12 @@ class ClipFlowWindow(QMainWindow):
         layout.addWidget(self._build_footer())
         self.setCentralWidget(root)
 
+    def eventFilter(self, obj, event):
+        if hasattr(self, "scroll_area") and obj is self.scroll_area.viewport() and event.type() == event.Type.Resize:
+            self._position_playlist_float_button()
+            self._refresh_playlist_float_button()
+        return super().eventFilter(obj, event)
+
     def _panel(self):
         frame = QFrame()
         frame.setObjectName("Panel")
@@ -344,9 +354,9 @@ class ClipFlowWindow(QMainWindow):
         self.primary_button.clicked.connect(self._handle_primary_action)
 
         self.folder_input = PathDisplayInput(self._initial_save_folder())
-        self.folder_button = QPushButton("찾아보기")
+        self.folder_button = QPushButton("저장 위치")
         self.folder_button.setObjectName("SecondaryButton")
-        self.folder_button.setFixedSize(100, TOP_FIELD_HEIGHT - 8)
+        self.folder_button.setFixedSize(104, TOP_FIELD_HEIGHT - 8)
         self.folder_button.setToolTip("저장 폴더 선택")
         self.folder_button.clicked.connect(self._choose_folder)
         folder_field = self._field_box("folder", self.folder_input, self.folder_button)
@@ -421,6 +431,7 @@ class ClipFlowWindow(QMainWindow):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.verticalScrollBar().valueChanged.connect(self._refresh_playlist_float_button)
         self.row_container = QWidget()
         self.row_container.setObjectName("RowContainer")
         self.row_layout = QVBoxLayout(self.row_container)
@@ -428,6 +439,12 @@ class ClipFlowWindow(QMainWindow):
         self.row_layout.setSpacing(0)
         self.row_layout.addStretch(1)
         self.scroll_area.setWidget(self.row_container)
+        self.scroll_area.viewport().installEventFilter(self)
+        self.playlist_float_button = QPushButton("접기", self.scroll_area.viewport())
+        self.playlist_float_button.setObjectName("FloatingButton")
+        self.playlist_float_button.setFixedSize(62, 30)
+        self.playlist_float_button.clicked.connect(self._collapse_floating_playlist)
+        self.playlist_float_button.hide()
         layout.addWidget(self.scroll_area, 1)
         return panel
 
@@ -519,7 +536,7 @@ class ClipFlowWindow(QMainWindow):
 
     def _restore_cookie_source(self):
         saved = self.settings.value(COOKIE_SOURCE_SETTING, COOKIE_CHOICES[0], str) or COOKIE_CHOICES[0]
-        display = f"쿠키: {saved}" if saved in COOKIE_CHOICES else COOKIE_DISPLAY_CHOICES[0]
+        display = COOKIE_SOURCE_TO_DISPLAY.get(saved, COOKIE_DISPLAY_CHOICES[0])
         index = self.cookie_combo.findText(display)
         self.cookie_combo.setCurrentIndex(index if index >= 0 else 0)
 
@@ -767,6 +784,61 @@ class ClipFlowWindow(QMainWindow):
         self._refresh_footer()
         self._refresh_row_selection()
         self._refresh_primary_action()
+        self._refresh_playlist_float_button()
+
+    def playlist_expansion_changed(self, row):
+        widget = row.get("widget") if isinstance(row, dict) else None
+        if widget:
+            widget.updateGeometry()
+        QTimer.singleShot(0, self._refresh_playlist_float_button)
+
+    def _expanded_playlist_row(self):
+        for row in self.rows:
+            if row.get("kind") == "playlist" and row.get("expanded"):
+                return row
+        return None
+
+    def _position_playlist_float_button(self):
+        if not hasattr(self, "playlist_float_button"):
+            return
+        viewport = self.scroll_area.viewport()
+        x = max(8, viewport.width() - self.playlist_float_button.width() - 12)
+        self.playlist_float_button.move(x, 10)
+        self.playlist_float_button.raise_()
+
+    def _refresh_playlist_float_button(self):
+        if not hasattr(self, "playlist_float_button"):
+            return
+        row = self._expanded_playlist_row()
+        widget = row.get("widget") if row else None
+        visible = False
+        if widget:
+            top = widget.mapTo(self.scroll_area.viewport(), QPoint(0, 0)).y()
+            bottom = top + widget.height()
+            visible = top < 4 and bottom > 0
+        self.playlist_float_button.setVisible(visible)
+        if visible:
+            self._position_playlist_float_button()
+
+    def _scroll_row_to_top(self, row):
+        widget = row.get("widget") if isinstance(row, dict) else None
+        if not widget:
+            return
+        top = widget.mapTo(self.row_container, QPoint(0, 0)).y()
+        bar = self.scroll_area.verticalScrollBar()
+        bar.setValue(max(bar.minimum(), min(bar.maximum(), top)))
+
+    def _collapse_floating_playlist(self):
+        row = self._expanded_playlist_row()
+        if not row:
+            return
+        row["expanded"] = False
+        widget = row.get("widget")
+        if widget:
+            widget._refresh_playlist_detail()
+            widget.updateGeometry()
+        self._scroll_row_to_top(row)
+        self._refresh_playlist_float_button()
 
     def _next_row_sequence(self):
         self._row_sequence += 1
