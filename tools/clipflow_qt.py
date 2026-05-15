@@ -302,7 +302,7 @@ class ClipFlowWindow(QMainWindow):
             if text:
                 self.url_input.setText(text)
             return
-        if self.selected_row_index >= 0 and self.rows:
+        if self._selected_row_matches_current_url():
             self._start_download()
             return
         self._start_analysis()
@@ -702,13 +702,25 @@ class ClipFlowWindow(QMainWindow):
 
     def _refresh_primary_action(self):
         has_url = bool(self.url_input.text().strip())
-        has_selection = self.selected_row_index >= 0 and bool(self.rows)
         if not has_url:
             self.primary_button.setText("붙여넣기")
-        elif has_selection:
+        elif self._selected_row_matches_current_url():
             self.primary_button.setText("다운로드")
         else:
             self.primary_button.setText("분석")
+
+    def _selected_row_matches_current_url(self):
+        if self.selected_row_index < 0 or self.selected_row_index >= len(self.rows):
+            return False
+        current_url = self.url_input.text().strip()
+        if not current_url:
+            return False
+        row = self.rows[self.selected_row_index]
+        row_urls = {
+            str(row.get("analysis_source_url") or "").strip(),
+            str(row.get("source_url") or "").strip(),
+        }
+        return current_url in row_urls
 
     def _refresh_footer(self):
         self.total_label.setText(f"총 항목: {len(self.rows)}")

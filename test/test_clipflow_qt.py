@@ -705,5 +705,68 @@ app.exec()
         self.assertEqual(result.stdout.splitlines(), ["", "1", "붙여넣기"])
 
 
+    def test_clipflow_qt_changed_url_analyzes_instead_of_downloading_selected_row(self):
+        script = r'''
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+analyzed = []
+downloaded = []
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    analyzed.append(url)
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": url.rsplit("/", 1)[-1],
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": url, "display_title": url.rsplit("/", 1)[-1], "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    downloaded.append(page_url)
+    return {"ok": True, "output_dir": output_dir}
+
+app = QApplication([])
+window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download)
+window.url_input.setText("https://media.test/watch/1")
+window._analysis_finished(fake_analyze("https://media.test/watch/1"))
+window.select_row(0)
+window.url_input.setText("https://media.test/watch/2")
+window._refresh_primary_action()
+print(window.primary_button.text() == "분석")
+window._handle_primary_action()
+
+def drive():
+    if window.analysis_thread or window.download_thread:
+        return
+    print(analyzed)
+    print(downloaded)
+    print(window.rows[0]["analysis_source_url"])
+    app.quit()
+
+timer = QTimer()
+timer.timeout.connect(drive)
+timer.start(20)
+QTimer.singleShot(5000, app.quit)
+app.exec()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "True",
+                "['https://media.test/watch/1', 'https://media.test/watch/2']",
+                "[]",
+                "https://media.test/watch/2",
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
