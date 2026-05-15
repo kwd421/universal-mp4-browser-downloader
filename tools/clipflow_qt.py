@@ -65,11 +65,6 @@ QFrame#Panel {
     border: 1px solid #dce6f4;
     border-radius: 12px;
 }
-QFrame#HeaderBar {
-    background: #f7fbff;
-    border: 1px solid #dce6f4;
-    border-radius: 8px;
-}
 QFrame#FieldBox {
     background: #ffffff;
     border: 1px solid #cad7e8;
@@ -175,13 +170,6 @@ QLabel#StatusPill {
     border-radius: 12px;
     padding: 4px 12px;
     font-size: 12px;
-    font-weight: 700;
-}
-QLabel#StatusCheck {
-    background: #dcfce7;
-    border-radius: 8px;
-    color: #15803d;
-    font-size: 10px;
     font-weight: 700;
 }
 QLineEdit, QComboBox {
@@ -817,11 +805,6 @@ class DownloadRowWidget(QFrame):
         self.status_label.setMaximumHeight(28)
         status_row_layout.addWidget(self.status_label)
 
-        self.status_check_label = QLabel("✓")
-        self.status_check_label.setObjectName("StatusCheck")
-        self.status_check_label.setFixedSize(16, 16)
-        self.status_check_label.setAlignment(Qt.AlignCenter)
-        status_row_layout.addWidget(self.status_check_label)
         status_layout.addWidget(self.status_row, 0, Qt.AlignCenter)
 
         self.progress_text = QLabel("")
@@ -982,7 +965,6 @@ class DownloadRowWidget(QFrame):
         self.status_label.setText(status)
         self.status_label.setToolTip(detail or status)
         self.status_label.setStyleSheet(STATUS_STYLES.get(status, STATUS_STYLES["준비"]))
-        self.status_check_label.setHidden(status != "완료")
         self._refresh_quality_mode()
         self._refresh_actions()
 
@@ -1131,8 +1113,10 @@ class ClipFlowWindow(QMainWindow):
         title.setObjectName("SectionTitle")
         self.count_label = QLabel("0개")
         self.count_label.setObjectName("MetaText")
-        sort_label = QLabel("정렬:")
-        sort_label.setObjectName("MetaText")
+        self.sort_label = QLabel("정렬:")
+        self.sort_label.setObjectName("MetaText")
+        self.sort_label.setFixedHeight(TOP_FIELD_HEIGHT - 2)
+        self.sort_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
         self.sort_order_combo = CleanComboBox()
         self.sort_order_combo.addItems(["최신순"])
         self.sort_order_combo.setMaximumWidth(120)
@@ -1141,36 +1125,12 @@ class ClipFlowWindow(QMainWindow):
         self.sort_direction_combo.setMaximumWidth(120)
         header.addWidget(title)
         header.addStretch(1)
-        header.addWidget(sort_label)
-        header.addWidget(self.sort_order_combo)
-        header.addWidget(self.sort_direction_combo)
+        header.addWidget(self.sort_label, 0, Qt.AlignVCenter)
+        header.addWidget(self.sort_order_combo, 0, Qt.AlignVCenter)
+        header.addWidget(self.sort_direction_combo, 0, Qt.AlignVCenter)
         layout.addLayout(header)
 
-        columns = QFrame()
-        columns.setObjectName("HeaderBar")
-        column_layout = QHBoxLayout(columns)
-        column_layout.setContentsMargins(12, 8, 12, 8)
-        column_layout.setSpacing(10)
         self.header_labels = []
-        for text, stretch, width in [
-            ("영상", 1, MEDIA_MIN_WIDTH),
-            ("품질", 0, QUALITY_WIDTH),
-            ("포맷", 0, FORMAT_WIDTH),
-            ("길이", 0, DURATION_WIDTH),
-            ("크기", 0, SIZE_WIDTH),
-            ("상태", 0, STATUS_WIDTH),
-            ("작업", 0, ACTIONS_WIDTH),
-        ]:
-            label = QLabel(text)
-            label.setStyleSheet("font-weight: 700; color: #344054;")
-            if width:
-                label.setMinimumWidth(width)
-                if stretch == 0:
-                    label.setMaximumWidth(width)
-                label.setAlignment(Qt.AlignCenter)
-            column_layout.addWidget(label, stretch)
-            self.header_labels.append(label)
-        layout.addWidget(columns)
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -1279,7 +1239,11 @@ class ClipFlowWindow(QMainWindow):
         self._refresh_primary_action()
 
     def _prepend_analysis_rows(self, analysis, grouped_rows, source_url):
-        self.rows = [row for row in self.rows if row.get("analysis_source_url") != source_url]
+        preserved_rows = [
+            row
+            for row in self.rows
+            if row.get("status") == "완료" and row.get("analysis_source_url") != source_url
+        ]
         new_rows = []
         for grouped_row in grouped_rows:
             candidate = grouped_row["candidate"]
@@ -1301,7 +1265,7 @@ class ClipFlowWindow(QMainWindow):
                 "messages": [],
             }
             new_rows.append(row)
-        self.rows = new_rows + self.rows
+        self.rows = new_rows + preserved_rows
         self.selected_row_index = 0 if self.rows else -1
         self._render_rows()
 

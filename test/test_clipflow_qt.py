@@ -31,7 +31,7 @@ class ClipFlowQtTests(unittest.TestCase):
 
     def test_clipflow_qt_polished_shell_removes_format_and_log_controls(self):
         script = r'''
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFrame
 from tools.clipflow_qt import ClipFlowWindow
 
 app = QApplication([])
@@ -44,7 +44,7 @@ print(window.cookie_combo.itemText(0))
 print(hasattr(window, "cookie_help_button"))
 print(hasattr(window, "row_container"))
 print("Noto Sans KR" in window.styleSheet())
-print("|".join(label.text() for label in window.header_labels))
+print(len(window.findChildren(QFrame, "HeaderBar")))
 print(window.windowIcon().isNull())
 '''
         result = run_qt_script(script)
@@ -61,7 +61,7 @@ print(window.windowIcon().isNull())
                 "True",
                 "True",
                 "True",
-                "영상|품질|포맷|길이|크기|상태|작업",
+                "0",
                 "False",
             ],
         )
@@ -81,9 +81,8 @@ print(window.font().family())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines()[0], "True")
 
-    def test_clipflow_qt_analysis_prepends_and_deduplicates_rows(self):
+    def test_clipflow_qt_analysis_replaces_pending_rows_but_keeps_completed_rows(self):
         script = r'''
-from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
 
@@ -114,40 +113,29 @@ def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_ev
 
 app = QApplication([])
 window = ClipFlowWindow(analyze_func=fake_analyze)
-steps = ["one", "two", "one"]
-started = False
 
 def row_titles():
     return [row["widget"].title_label.text() for row in window.rows]
 
-def drive():
-    global started
-    if not started:
-        started = True
-        window.url_input.setText("https://media.test/" + steps.pop(0))
-        window._start_analysis()
-        return
-    if window.analysis_thread:
-        return
-    if steps:
-        window.url_input.setText("https://media.test/" + steps.pop(0))
-        window._start_analysis()
-        return
-    if len(window.rows) == 2:
-        print("|".join(row_titles()))
-        print(window.count_label.text())
-        app.quit()
-
-timer = QTimer()
-timer.timeout.connect(drive)
-timer.start(20)
-QTimer.singleShot(5000, app.quit)
-app.exec()
+window._analysis_finished(fake_analyze("https://media.test/one"))
+print("|".join(row_titles()))
+print(window.count_label.text())
+window._analysis_finished(fake_analyze("https://media.test/two"))
+print("|".join(row_titles()))
+print(window.count_label.text())
+window.rows[0]["widget"].set_status("완료")
+window._analysis_finished(fake_analyze("https://media.test/three"))
+print("|".join(row_titles()))
+print("|".join(row["status"] for row in window.rows))
+print(window.count_label.text())
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["one|two", "2개"])
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["one", "1개", "two", "1개", "three|two", "준비|완료", "2개"],
+        )
 
     def test_clipflow_qt_download_uses_selected_quality_and_row_local_progress(self):
         script = r'''
@@ -327,7 +315,7 @@ app.exec()
             ["2", "1080p", "720p", "2", "MP4", "WEBM", "webm-1080"],
         )
 
-    def test_clipflow_qt_status_column_shows_done_check_and_error_detail(self):
+    def test_clipflow_qt_status_column_has_no_done_check_and_shows_error_detail(self):
         script = r'''
 from PySide6.QtWidgets import QApplication
 from tools.clipflow_qt import ClipFlowWindow
@@ -351,11 +339,10 @@ window._analysis_finished(fake_analyze(url))
 row_widget = window.rows[0]["widget"]
 print(hasattr(row_widget, "status_check_label"))
 row_widget.set_status("완료")
-print(row_widget.status_check_label.isHidden())
+print(row_widget.status_label.text())
 print(row_widget.progress_text.isHidden())
 row_widget.set_status("오류", "network problem")
 row_widget.set_progress(0, "")
-print(row_widget.status_check_label.isHidden())
 print(row_widget.progress_text.isHidden())
 print(row_widget.progress_text.text())
 print(row_widget.progress_bar.isHidden())
@@ -365,13 +352,12 @@ print(row_widget.progress_bar.isHidden())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["True", "False", "True", "True", "False", "network problem", "True"],
+            ["False", "완료", "True", "False", "network problem", "True"],
         )
 
     def test_clipflow_qt_media_column_expands_separately_from_quality_column(self):
         script = r'''
-from PySide6.QtCore import QPoint
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFrame
 from tools.clipflow_qt import ClipFlowWindow
 
 url = "https://media.test/video"
@@ -394,25 +380,10 @@ window._analysis_finished(fake_analyze(url))
 window.show()
 app.processEvents()
 row_widget = window.rows[0]["widget"]
-fixed_column_widgets = [
-    row_widget.quality_combo,
-    row_widget.format_combo,
-    row_widget.info_widget,
-    row_widget.size_widget,
-    row_widget.status_widget,
-    row_widget.actions_widget,
-]
-fixed_columns_align = all(
-    abs(label.mapTo(window, QPoint(0, 0)).x() - widget.mapTo(window, QPoint(0, 0)).x()) <= 1
-    and abs(label.width() - widget.width()) <= 1
-    for label, widget in zip(window.header_labels[1:], fixed_column_widgets)
-)
+fixed_column_widgets = [row_widget.quality_combo, row_widget.format_combo, row_widget.info_widget, row_widget.size_widget, row_widget.status_widget, row_widget.actions_widget]
+print(len(window.findChildren(QFrame, "HeaderBar")))
 print(row_widget.item_widget.maximumWidth() > 10000)
-print(window.header_labels[0].maximumWidth() > 10000)
-print(window.header_labels[1].minimumWidth())
-print(row_widget.quality_combo.width())
-print(row_widget.format_combo.width())
-print(fixed_columns_align)
+print(",".join(str(widget.width()) for widget in fixed_column_widgets))
 print(window.minimumWidth() >= 1080)
 '''
         result = run_qt_script(script)
@@ -420,8 +391,31 @@ print(window.minimumWidth() >= 1080)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["True", "True", "88", "88", "78", "True", "True"],
+            ["0", "True", "88,78,84,92,112,116", "True"],
         )
+
+    def test_clipflow_qt_sort_label_aligns_with_sort_dropdowns(self):
+        script = r'''
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.resize(1500, 1100)
+window.show()
+app.processEvents()
+
+label_top = window.sort_label.mapTo(window, QPoint(0, 0)).y()
+combo_top = window.sort_order_combo.mapTo(window, QPoint(0, 0)).y()
+print(window.sort_label.height())
+print(window.sort_order_combo.height())
+print(abs(label_top - combo_top) <= 1)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["40", "40", "True"])
 
     def test_clipflow_qt_input_controls_keep_shared_grid_edges(self):
         script = r'''
