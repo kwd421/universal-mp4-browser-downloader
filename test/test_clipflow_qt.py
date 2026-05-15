@@ -189,7 +189,7 @@ app.exec()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["[None]", "자동", "자동", "자동", "webm-1080", "40 B", "00:02:00", "webm-1080"],
+            ["['all']", "자동", "자동", "자동", "webm-1080", "40 B", "00:02:00", "webm-1080"],
         )
 
     def test_clipflow_qt_audio_format_disables_codec_and_frame_preferences(self):

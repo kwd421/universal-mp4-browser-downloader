@@ -107,6 +107,21 @@ class CandidatePresenterTests(unittest.TestCase):
 
         self.assertIsNone(selected)
 
+    def test_grouped_video_keeps_audio_variants_for_global_preferences(self):
+        candidates = [
+            {"id": "video", "source": "s", "title": "Video", "display_title": "Video", "thumbnail": "t", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1", "sort_bytes": 100},
+            {"id": "audio", "source": "s", "title": "Video", "display_title": "Video", "thumbnail": "t", "media_type": "audio", "output_ext": "mp3", "height": 0, "fps": 0, "vcodec": "none", "sort_bytes": 20},
+        ]
+
+        rows = presenter.group_candidates(candidates)
+        selected = presenter.select_candidate_for_preferences(
+            rows[0]["qualities"],
+            presenter.DownloadPreferences(quality="자동", output_format="MP3", codec="자동", frame_rate="자동"),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(selected["id"], "audio")
+
     def test_select_candidate_specific_quality_uses_nearest_lower_then_best_same_family(self):
         candidates = [
             {"id": "1440", "output_ext": "mp4", "height": 1440, "fps": 30, "vcodec": "avc1", "sort_bytes": 200},

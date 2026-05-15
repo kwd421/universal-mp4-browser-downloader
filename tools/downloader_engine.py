@@ -24,7 +24,9 @@ TRAILING_DOMAIN_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 VIDEO_EXTENSIONS = {"mp4", "m4v", "mov", "webm", "mkv", "flv", "ts"}
-OUTPUT_EXTENSIONS = {"mp4", "webm", "wav"}
+AUDIO_OUTPUT_EXTENSIONS = {"mp3", "wav", "aac"}
+OUTPUT_EXTENSIONS = {"mp4", "webm"} | AUDIO_OUTPUT_EXTENSIONS
+ALL_OUTPUT_EXT = "all"
 SIZE_PROBE_LIMIT = 12
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
@@ -539,6 +541,8 @@ def sort_candidates(candidates):
 
 def normalized_output_ext(output_ext):
     ext = str(output_ext or "").strip().lower()
+    if ext == ALL_OUTPUT_EXT:
+        return ALL_OUTPUT_EXT
     return ext if ext in OUTPUT_EXTENSIONS else None
 
 
@@ -604,6 +608,15 @@ def candidate_filesize_fields(fmt, sort_bytes=0, size_source="unknown"):
 
 def candidates_from_info(info, output_ext=None):
     requested_ext = normalized_output_ext(output_ext)
+    include_all = requested_ext == ALL_OUTPUT_EXT
+    requested_filter = None if include_all else requested_ext
+    audio_output_exts = (
+        [requested_filter]
+        if requested_filter in AUDIO_OUTPUT_EXTENSIONS
+        else sorted(AUDIO_OUTPUT_EXTENSIONS)
+        if include_all
+        else []
+    )
     candidates = []
     seen = set()
     for video_info in iter_video_infos(info):
@@ -618,48 +631,53 @@ def candidates_from_info(info, output_ext=None):
             ext = str(fmt.get("ext") or "").lower()
             vcodec = str(fmt.get("vcodec") or "unknown")
             acodec = str(fmt.get("acodec") or "unknown")
-            if requested_ext == "wav":
+            if audio_output_exts and is_audio_format(fmt):
                 if not is_audio_format(fmt):
                     continue
                 size, size_source = media_size_for_format(fmt, duration)
                 filesize, filesize_approx = candidate_filesize_fields(fmt, size, size_source)
                 source = video_info.get("webpage_url") or video_info.get("original_url") or info.get("webpage_url") or ""
-                key = (source, "wav", format_id, fmt.get("url"))
-                if key in seen:
+                for audio_output_ext in audio_output_exts:
+                    key = (source, audio_output_ext, format_id, fmt.get("url"))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    candidates.append(
+                        {
+                            "id": f"{len(candidates) + 1}",
+                            "format_id": format_id or "bestaudio",
+                            "format_selector": format_id or "bestaudio",
+                            "url": fmt.get("url") or source,
+                            "title": title,
+                            "display_title": display_title,
+                            "thumbnail": thumbnail,
+                            "duration": duration,
+                            "ext": audio_output_ext,
+                            "source_ext": ext or "unknown",
+                            "output_ext": audio_output_ext,
+                            "resolution": "",
+                            "height": 0,
+                            "fps": 0,
+                            "vcodec": "none",
+                            "acodec": acodec,
+                            "filesize": filesize,
+                            "filesize_approx": filesize_approx,
+                            "sort_bytes": size,
+                            "size_source": size_source,
+                            "source": source,
+                            "protocol": format_protocol(fmt),
+                            "is_manifest": is_manifest_format(fmt),
+                            "media_type": "audio",
+                            "note": str(fmt.get("format_note") or fmt.get("format") or "audio"),
+                        }
+                    )
+                if requested_filter in AUDIO_OUTPUT_EXTENSIONS:
                     continue
-                seen.add(key)
-                candidates.append(
-                    {
-                        "id": f"{len(candidates) + 1}",
-                        "format_id": format_id or "bestaudio",
-                        "format_selector": format_id or "bestaudio",
-                        "url": fmt.get("url") or source,
-                        "title": title,
-                        "display_title": display_title,
-                        "thumbnail": thumbnail,
-                        "duration": duration,
-                        "ext": "wav",
-                        "source_ext": ext or "unknown",
-                        "output_ext": "wav",
-                        "resolution": "",
-                        "height": 0,
-                        "fps": 0,
-                        "vcodec": "none",
-                        "acodec": acodec,
-                        "filesize": filesize,
-                        "filesize_approx": filesize_approx,
-                        "sort_bytes": size,
-                        "size_source": size_source,
-                        "source": source,
-                        "protocol": format_protocol(fmt),
-                        "is_manifest": is_manifest_format(fmt),
-                        "media_type": "audio",
-                        "note": str(fmt.get("format_note") or fmt.get("format") or "audio"),
-                    }
-                )
+
+            if requested_filter in AUDIO_OUTPUT_EXTENSIONS:
                 continue
 
-            if requested_ext and ext != requested_ext:
+            if requested_filter and ext != requested_filter:
                 continue
             has_video = vcodec.lower() != "none" or ext in VIDEO_EXTENSIONS or safe_int(fmt.get("height")) > 0
             if not has_video or vcodec.lower() == "none":
@@ -692,7 +710,7 @@ def candidates_from_info(info, output_ext=None):
                     "duration": duration,
                     "ext": ext or "unknown",
                     "source_ext": ext or "unknown",
-                    "output_ext": requested_ext or ext or "mp4",
+                    "output_ext": requested_filter or ext or "mp4",
                     "resolution": resolution_for(fmt),
                     "height": safe_int(fmt.get("height")),
                     "fps": safe_int(fmt.get("fps")),
@@ -711,10 +729,10 @@ def candidates_from_info(info, output_ext=None):
             )
 
         if not formats and video_info.get("url"):
-            if requested_ext == "wav":
+            if requested_filter in AUDIO_OUTPUT_EXTENSIONS:
                 continue
             direct_ext = str(video_info.get("ext") or "unknown").lower()
-            if requested_ext and direct_ext != requested_ext:
+            if requested_filter and direct_ext != requested_filter:
                 continue
             size, size_source = media_size_for_format(video_info, duration)
             filesize, filesize_approx = candidate_filesize_fields(video_info, size, size_source)
@@ -730,7 +748,7 @@ def candidates_from_info(info, output_ext=None):
                     "duration": duration,
                     "ext": direct_ext,
                     "source_ext": direct_ext,
-                    "output_ext": requested_ext or direct_ext,
+                    "output_ext": requested_filter or direct_ext,
                     "resolution": resolution_for(video_info),
                     "height": safe_int(video_info.get("height")),
                     "fps": safe_int(video_info.get("fps")),
@@ -801,11 +819,11 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
             "postprocessor_hooks": [postprocessor_hook(on_event)],
         }
     )
-    if output_ext == "wav":
+    if output_ext in AUDIO_OUTPUT_EXTENSIONS:
         options.update(
             {
-                "final_ext": "wav",
-                "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
+                "final_ext": output_ext,
+                "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": output_ext}],
             }
         )
     else:
@@ -1037,8 +1055,10 @@ def thumbnail_from_browser_dom(dom):
 
 def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
     requested_ext = normalized_output_ext(output_ext)
-    if requested_ext == "wav":
-        raise RuntimeError("Browser DOM fallback does not expose audio-only WAV candidates.")
+    if requested_ext in AUDIO_OUTPUT_EXTENSIONS:
+        raise RuntimeError("Browser DOM fallback does not expose audio-only candidates.")
+    if requested_ext == ALL_OUTPUT_EXT:
+        requested_ext = None
     title = title_from_browser_dom(dom)
     thumbnail = thumbnail_from_browser_dom(dom)
     parsed = urllib.parse.urlsplit(url)

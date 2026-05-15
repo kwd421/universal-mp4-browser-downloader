@@ -19,11 +19,13 @@ class DownloadPreferences:
 
 
 def candidate_group_key(candidate):
+    media_type = candidate.get("media_type") or "video"
+    group_media_type = "video" if media_type == "audio" else media_type
     return (
         candidate.get("source") or candidate.get("url") or "",
         candidate.get("display_title") or candidate.get("title") or "video",
         candidate.get("thumbnail") or "",
-        candidate.get("media_type") or "video",
+        group_media_type,
     )
 
 

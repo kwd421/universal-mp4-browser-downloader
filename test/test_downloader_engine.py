@@ -148,6 +148,8 @@ class DownloaderEngineTests(unittest.TestCase):
         mp4 = engine.candidates_from_info(SAMPLE_INFO, output_ext="MP4")
         webm = engine.candidates_from_info(SAMPLE_INFO, output_ext="WEBM")
         wav = engine.candidates_from_info(SAMPLE_INFO, output_ext="WAV")
+        mp3 = engine.candidates_from_info(SAMPLE_INFO, output_ext="MP3")
+        aac = engine.candidates_from_info(SAMPLE_INFO, output_ext="AAC")
 
         self.assertEqual([candidate["ext"] for candidate in mp4], ["mp4", "mp4", "mp4"])
         self.assertEqual([candidate["ext"] for candidate in webm], ["webm"])
@@ -155,6 +157,20 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(wav[0]["format_selector"], "140")
         self.assertEqual(wav[0]["resolution"], "")
         self.assertEqual(wav[0]["output_ext"], "wav")
+        self.assertEqual([candidate["ext"] for candidate in mp3], ["mp3"])
+        self.assertEqual(mp3[0]["media_type"], "audio")
+        self.assertEqual([candidate["ext"] for candidate in aac], ["aac"])
+
+    def test_all_output_preserves_audio_candidates_for_global_preferences(self):
+        candidates = engine.candidates_from_info(SAMPLE_INFO, output_ext="all")
+
+        output_exts = [candidate["output_ext"] for candidate in candidates]
+
+        self.assertIn("mp3", output_exts)
+        self.assertIn("wav", output_exts)
+        self.assertIn("aac", output_exts)
+        self.assertIn("mp4", output_exts)
+        self.assertIn("webm", output_exts)
 
     def test_missing_sizes_are_filled_from_http_content_length(self):
         candidates = [
@@ -277,6 +293,15 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(options["final_ext"], "wav")
         self.assertEqual(options["postprocessors"][0]["key"], "FFmpegExtractAudio")
         self.assertEqual(options["postprocessors"][0]["preferredcodec"], "wav")
+
+    def test_download_options_convert_audio_candidates_to_mp3_and_aac(self):
+        for output_ext in ("mp3", "aac"):
+            options = engine.build_download_options({"format_selector": "140", "output_ext": output_ext}, "C:/Temp")
+
+            self.assertEqual(options["format"], "140")
+            self.assertEqual(options["final_ext"], output_ext)
+            self.assertEqual(options["postprocessors"][0]["key"], "FFmpegExtractAudio")
+            self.assertEqual(options["postprocessors"][0]["preferredcodec"], output_ext)
 
     def test_download_options_pass_browser_dom_referer_and_origin_headers(self):
         candidate = {

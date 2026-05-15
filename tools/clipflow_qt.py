@@ -413,7 +413,7 @@ class ClipFlowWindow(QMainWindow):
         self.analysis_worker = AnalyzeWorker(
             url,
             cookie_source_from_display(self.cookie_combo.currentText()),
-            None,
+            engine.ALL_OUTPUT_EXT,
             self.analyze_func,
         )
         self.analysis_worker.moveToThread(self.analysis_thread)
