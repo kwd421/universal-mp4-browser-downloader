@@ -71,6 +71,7 @@ SORT_LABELS = {"latest": "최신순", "name": "이름순"}
 SORT_KEYS_BY_LABEL = {label: key for key, label in SORT_LABELS.items()}
 COOKIE_DISPLAY_TO_SOURCE = dict(zip(COOKIE_DISPLAY_CHOICES, COOKIE_CHOICES))
 COOKIE_SOURCE_TO_DISPLAY = dict(zip(COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES))
+DOWNLOAD_CONCURRENCY = 3
 
 
 def default_save_folder():
@@ -229,7 +230,7 @@ class PreferencesDialog(QDialog):
 
 
 class DeleteConfirmDialog(QDialog):
-    def __init__(self, output_path, parent=None):
+    def __init__(self, output_path, parent=None, title_text=None, detail_text=None):
         super().__init__(parent)
         self.setWindowTitle("파일 삭제")
         self.setModal(True)
@@ -239,9 +240,9 @@ class DeleteConfirmDialog(QDialog):
         layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(12)
 
-        title = QLabel("파일을 삭제하시겠습니까?")
+        title = QLabel(title_text or "파일을 삭제하시겠습니까?")
         title.setObjectName("SectionTitle")
-        detail = QLabel(str(output_path))
+        detail = QLabel(detail_text if detail_text is not None else str(output_path))
         detail.setObjectName("MetaText")
         detail.setWordWrap(True)
         layout.addWidget(title)
@@ -249,9 +250,9 @@ class DeleteConfirmDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        self.cancel_button = QPushButton("취소")
+        self.cancel_button = QPushButton("No")
         self.cancel_button.setObjectName("SecondaryButton")
-        self.ok_button = QPushButton("확인")
+        self.ok_button = QPushButton("Yes")
         self.cancel_button.clicked.connect(self.reject)
         self.ok_button.clicked.connect(self.accept)
         buttons.addWidget(self.cancel_button)
@@ -293,6 +294,8 @@ class ClipFlowWindow(QMainWindow):
         self.download_thread = None
         self.download_worker = None
         self.active_download_row = None
+        self.active_downloads = []
+        self.queued_download_rows = []
         self.selected_row_index = -1
         self.select_mode = False
         self.event_messages = []
@@ -804,7 +807,7 @@ class ClipFlowWindow(QMainWindow):
         )
         self.analysis_worker.moveToThread(self.analysis_thread)
         self.analysis_thread.started.connect(self.analysis_worker.run)
-        self.analysis_worker.event.connect(self._handle_engine_event)
+        self.analysis_worker.event.connect(self._handle_analysis_event)
         self.analysis_worker.finished.connect(self._analysis_finished)
         self.analysis_worker.failed.connect(self._analysis_failed)
         self.analysis_worker.finished.connect(self.analysis_thread.quit)
@@ -846,7 +849,7 @@ class ClipFlowWindow(QMainWindow):
         preserved_rows = [
             row
             for row in self.rows
-            if row.get("status") == "완료"
+            if self._should_preserve_existing_row(row)
         ]
         if analysis.get("is_playlist"):
             playlist_candidate = self._playlist_candidate_from_analysis(analysis, grouped_rows, source_url)
@@ -904,6 +907,11 @@ class ClipFlowWindow(QMainWindow):
         self._sort_rows()
         self.selected_row_index = 0 if self.rows else -1
         self._render_rows()
+
+    def _should_preserve_existing_row(self, row):
+        if row.get("status") in {"완료", "다운로드 중", "대기"}:
+            return True
+        return self._row_is_downloading(row) or row in self.queued_download_rows
 
     def _playlist_candidate_from_analysis(self, analysis, grouped_rows, source_url):
         first_candidate = (grouped_rows[0].get("candidate") if grouped_rows else {}) or {}
@@ -1136,56 +1144,12 @@ class ClipFlowWindow(QMainWindow):
         return self.selected_candidate_for_row_ref(self.rows[row_index])
 
     def _start_download(self):
-        if self.download_thread and self.download_thread.isRunning():
-            return
         if self.selected_row_index < 0 or self.selected_row_index >= len(self.rows):
             self._set_status("다운로드할 항목을 선택하세요")
             return
         self.start_download_for_row(self.rows[self.selected_row_index])
 
-    def _expected_output_path(self, candidate):
-        if str((candidate or {}).get("media_type") or "").lower() == "playlist":
-            return None
-        try:
-            out_dir = engine.output_dir_for_candidate(candidate, self.folder_input.text())
-            stem = engine.filename_stem_for_candidate(candidate)
-            ext = engine.normalized_output_ext(candidate.get("output_ext")) or "mp4"
-            return Path(out_dir) / f"{stem}.{ext}"
-        except Exception:
-            return None
-
-    def _confirm_overwrite(self, path):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("이미 있는 파일")
-        dialog.setModal(True)
-        dialog.setMinimumWidth(380)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(12)
-        title = QLabel("이미 같은 파일이 있어요. 덮어쓸까요?")
-        title.setObjectName("SectionTitle")
-        title.setWordWrap(True)
-        detail = QLabel(str(path))
-        detail.setObjectName("MetaText")
-        detail.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(detail)
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        cancel = QPushButton("취소")
-        cancel.setObjectName("SecondaryButton")
-        confirm = QPushButton("덮어쓰기")
-        cancel.clicked.connect(dialog.reject)
-        confirm.clicked.connect(dialog.accept)
-        buttons.addWidget(cancel)
-        buttons.addWidget(confirm)
-        layout.addLayout(buttons)
-        return dialog.exec() == QDialog.Accepted
-
     def start_download_for_row(self, row):
-        if self.download_thread and self.download_thread.isRunning():
-            self._set_status("다른 항목을 다운로드하는 중입니다")
-            return
         if row not in self.rows:
             return
         candidate = self.selected_candidate_for_row_ref(row)
@@ -1193,51 +1157,113 @@ class ClipFlowWindow(QMainWindow):
             self._set_status("다운로드할 항목을 선택하세요")
             return
 
-        expected = self._expected_output_path(candidate)
-        if expected is not None and expected.exists():
-            if not self._confirm_overwrite(expected):
-                self._set_status("취소됨 · 이미 같은 파일이 있어요")
-                return
+        if self._row_is_downloading(row):
+            self._set_status("이미 다운로드 중")
+            return
+        if row in self.queued_download_rows:
+            self._set_status("다운로드 대기 중")
+            return
+        existing_output = self._existing_output_path_for_row(row, candidate)
+        if existing_output:
+            self._mark_existing_output(row, existing_output)
+            return
+        if len(self.active_downloads) >= DOWNLOAD_CONCURRENCY:
+            self.queued_download_rows.append(row)
+            widget = row.get("widget")
+            if widget:
+                widget.set_status("대기")
+                widget.set_progress(0, "")
+            self._set_status("다운로드 대기 중")
+            self._refresh_footer()
+            return
 
+        self._begin_download(row, candidate)
+
+    def _begin_download(self, row, candidate=None):
+        candidate = candidate or self.selected_candidate_for_row_ref(row)
+        if not candidate:
+            return
         self.selected_row_index = self.rows.index(row)
         self._refresh_row_selection()
-        self.active_download_row = row
         row["download_started_at"] = time.time()
-        row["widget"].set_status("다운로드 중")
-        row["widget"].set_progress(0, "0%")
-        self.primary_button.setEnabled(False)
+        widget = row.get("widget")
+        if widget:
+            widget.set_status("다운로드 중")
+            widget.set_progress(0, "0%")
         self._set_status("다운로드 중")
 
         page_url = row.get("source_url") or (self.analysis or {}).get("webpage_url") or self.url_input.text().strip()
-        self.download_thread = QThread(self)
-        self.download_worker = DownloadWorker(
+        thread = QThread(self)
+        worker = DownloadWorker(
             page_url,
             candidate,
             engine.output_dir_for_candidate(candidate, self.folder_input.text()),
             cookie_source_from_display(self.cookie_combo.currentText()),
             self.download_func,
         )
-        self.download_worker.moveToThread(self.download_thread)
-        self.download_thread.started.connect(self.download_worker.run)
-        self.download_worker.event.connect(self._handle_engine_event)
-        self.download_worker.finished.connect(self._download_finished)
-        self.download_worker.failed.connect(self._download_failed)
-        self.download_worker.finished.connect(self.download_thread.quit)
-        self.download_worker.failed.connect(self.download_thread.quit)
-        self.download_thread.finished.connect(self.download_worker.deleteLater)
-        self.download_thread.finished.connect(self._download_thread_finished)
-        self.download_thread.start()
+        self.active_downloads.append({"thread": thread, "worker": worker, "row": row})
+        self._sync_legacy_download_refs()
+        self._refresh_primary_action()
+        self._refresh_footer()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.event.connect(lambda event, download_row=row: self._handle_engine_event_for(download_row, event))
+        worker.finished.connect(lambda result, download_row=row: self._download_finished_for(download_row, result))
+        worker.failed.connect(lambda message, download_row=row: self._download_failed_for(download_row, message))
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda download_row=row, download_thread=thread: self._download_thread_finished_for(download_row, download_thread))
+        thread.start()
+
+    def _row_is_downloading(self, row):
+        return any(item.get("row") is row for item in self.active_downloads)
+
+    def _sync_legacy_download_refs(self):
+        first = self.active_downloads[0] if self.active_downloads else None
+        self.download_thread = first.get("thread") if first else None
+        self.download_worker = first.get("worker") if first else None
+        self.active_download_row = first.get("row") if first else None
+
+    def _existing_output_path_for_row(self, row, candidate):
+        saved_output = row.get("output_path") or ""
+        output_path = Path(saved_output)
+        if (
+            saved_output
+            and row.get("status") == "완료"
+            and engine.completed_output_exists(output_path, candidate)
+            and not engine.output_is_too_small_for_candidate(output_path, candidate)
+        ):
+            return output_path
+        return engine.existing_output_path_for_candidate(candidate, self.folder_input.text())
+
+    def _mark_existing_output(self, row, output_path):
+        row["output_path"] = str(output_path)
+        row["progress"] = 100
+        row["progress_text"] = ""
+        widget = row.get("widget")
+        if widget:
+            widget.set_status("완료")
+            widget.set_progress(100, "완료")
+            widget._refresh_actions()
+        self._save_completed_history()
+        self._set_status(f"이미 파일 있음: {Path(output_path).name}")
+        self._refresh_primary_action()
+        self._refresh_footer()
 
     @Slot(dict)
     def _download_finished(self, result):
-        if self.active_download_row:
-            selected = self.selected_candidate_for_row_ref(self.active_download_row)
+        self._download_finished_for(self.active_download_row, result)
+
+    def _download_finished_for(self, row, result):
+        if row:
+            selected = self.selected_candidate_for_row_ref(row)
             if selected:
-                self.active_download_row["candidate"] = selected
-                self.active_download_row["qualities"] = [selected]
-                self.active_download_row["quality_options"] = build_quality_options([selected])
-            self._resolve_finished_output_path(self.active_download_row, result)
-            widget = self.active_download_row.get("widget")
+                row["candidate"] = selected
+                row["qualities"] = [selected]
+                row["quality_options"] = build_quality_options([selected])
+            self._resolve_finished_output_path(row, result)
+            widget = row.get("widget")
             if widget:
                 widget.set_status("완료")
                 widget.set_progress(100, "완료")
@@ -1254,7 +1280,11 @@ class ClipFlowWindow(QMainWindow):
         known_value = row.get("output_path")
         if known_value:
             known_path = Path(known_value)
-            if known_path.exists():
+            selected = self.selected_candidate_for_row_ref(row) or {}
+            if (
+                engine.completed_output_exists(known_path, selected)
+                and not engine.output_is_too_small_for_candidate(known_path, selected)
+            ):
                 row["output_path"] = str(known_path)
                 return
 
@@ -1284,10 +1314,13 @@ class ClipFlowWindow(QMainWindow):
 
     @Slot(str)
     def _download_failed(self, message):
+        self._download_failed_for(self.active_download_row, message)
+
+    def _download_failed_for(self, row, message):
         message = engine.strip_ansi(message)
-        if self.active_download_row:
-            widget = self.active_download_row.get("widget")
-            self.active_download_row["messages"].append(message)
+        if row:
+            widget = row.get("widget")
+            row["messages"].append(message)
             if widget:
                 widget.set_status("오류", message)
                 widget.set_progress(0, "")
@@ -1295,17 +1328,51 @@ class ClipFlowWindow(QMainWindow):
 
     @Slot()
     def _download_thread_finished(self):
-        self.primary_button.setEnabled(True)
-        self.download_thread = None
-        self.download_worker = None
-        self.active_download_row = None
+        thread = self.sender()
+        self._download_thread_finished_for(None, thread)
+
+    def _download_thread_finished_for(self, row, thread):
+        self.active_downloads = [
+            item for item in self.active_downloads
+            if item.get("thread") is not thread and (row is None or item.get("row") is not row)
+        ]
+        self._sync_legacy_download_refs()
         self._refresh_primary_action()
+        self._refresh_footer()
+        self._start_queued_downloads()
+
+    def _start_queued_downloads(self):
+        while self.queued_download_rows and len(self.active_downloads) < DOWNLOAD_CONCURRENCY:
+            row = self.queued_download_rows.pop(0)
+            if row not in self.rows or self._row_is_downloading(row):
+                continue
+            candidate = self.selected_candidate_for_row_ref(row)
+            if not candidate:
+                continue
+            existing_output = self._existing_output_path_for_row(row, candidate)
+            if existing_output:
+                self._mark_existing_output(row, existing_output)
+                continue
+            self._begin_download(row, candidate)
 
     @Slot(dict)
     def _handle_engine_event(self, event):
+        self._handle_engine_event_for(self.active_download_row, event)
+
+    @Slot(dict)
+    def _handle_analysis_event(self, event):
         event_type = event.get("type")
         message = event.get("message") or event.get("path") or ""
-        row = self.active_download_row
+        if event_type in {"progress", "status"}:
+            self.status_label.setText(message or "분석 중")
+            if message:
+                self.event_messages.append(message)
+        elif event_type in {"log", "done", "file"} and message:
+            self.event_messages.append(message)
+
+    def _handle_engine_event_for(self, row, event):
+        event_type = event.get("type")
+        message = event.get("message") or event.get("path") or ""
         widget = row.get("widget") if row else None
         if event_type == "progress":
             percent = max(0, min(100, int(float(event.get("percent") or 0))))
@@ -1345,11 +1412,20 @@ class ClipFlowWindow(QMainWindow):
             self.open_url_func(source_url)
 
     def open_folder_for_row(self, row):
-        output_path = Path(row.get("output_path") or "")
-        if output_path.exists():
-            self._reveal_in_file_manager(output_path)
-            return
-        target = Path(self.folder_input.text()).expanduser()
+        if row.get("kind") == "playlist":
+            candidate = row.get("candidate") or {}
+            playlist_folder = engine.output_dir_for_candidate(candidate, self.folder_input.text())
+            if playlist_folder.exists():
+                target = playlist_folder
+            else:
+                target = self._first_playlist_output_parent(row) or Path(self.folder_input.text()).expanduser()
+        else:
+            saved_output = row.get("output_path") or ""
+            output_path = Path(saved_output)
+            if saved_output and output_path.exists():
+                target = output_path.parent
+            else:
+                target = Path(self.folder_input.text()).expanduser()
         target.mkdir(parents=True, exist_ok=True)
         self._open_path(target)
 
@@ -1365,6 +1441,19 @@ class ClipFlowWindow(QMainWindow):
 
     def _open_path(self, path):
         return QDesktopServices.openUrl(local_file_url(path))
+
+    def _first_playlist_output_parent(self, row):
+        for entry in row.get("playlist_entries") or []:
+            child = entry if isinstance(entry, dict) else {}
+            saved_output = child.get("output_path") or ""
+            output_path = Path(saved_output)
+            if saved_output and output_path.exists():
+                return output_path.parent
+            candidate = child.get("candidate") if isinstance(child.get("candidate"), dict) else None
+            expected = engine.existing_output_path_for_candidate(candidate or {}, self.folder_input.text())
+            if expected:
+                return expected.parent
+        return None
 
     def remove_row(self, row):
         if row.get("status") in {"분석 중", "다운로드 중"}:
@@ -1466,8 +1555,16 @@ class ClipFlowWindow(QMainWindow):
         return dialog.exec() == QDialog.Accepted
 
     def delete_file_for_row(self, row):
-        output_path = Path(row.get("output_path") or "")
-        if not output_path.exists() or row.get("status") == "다운로드 중":
+        if row.get("status") == "다운로드 중":
+            return
+        if row.get("kind") == "playlist":
+            output_path = engine.output_dir_for_candidate(row.get("candidate") or {}, self.folder_input.text())
+        else:
+            saved_output = row.get("output_path") or ""
+            if not saved_output:
+                return
+            output_path = Path(saved_output)
+        if not output_path.exists():
             return
         confirmed = (
             self.confirm_delete_func(output_path)
@@ -1477,7 +1574,13 @@ class ClipFlowWindow(QMainWindow):
         if not confirmed:
             return
         try:
-            output_path.unlink()
+            if output_path.is_dir():
+                for child in output_path.iterdir():
+                    if child.is_file():
+                        child.unlink()
+                output_path.rmdir()
+            else:
+                output_path.unlink()
         except OSError as exc:
             QMessageBox.warning(self, "파일 삭제 실패", str(exc))
             return
@@ -1496,11 +1599,11 @@ class ClipFlowWindow(QMainWindow):
 
     def _refresh_primary_action(self):
         self._refresh_url_trailing()
-        downloading = bool(self.download_thread and self.download_thread.isRunning())
         has_target = 0 <= self.selected_row_index < len(self.rows)
         if has_target:
-            has_target = self.rows[self.selected_row_index].get("status") not in {"분석 중", "다운로드 중"}
-        self.primary_button.setEnabled(has_target and not downloading)
+            has_target = self.rows[self.selected_row_index].get("status") != "분석 중"
+        analyzing = bool(self.analysis_thread and self.analysis_thread.isRunning())
+        self.primary_button.setEnabled(has_target and not analyzing)
 
     def _selected_row_matches_current_url(self):
         if self.selected_row_index < 0 or self.selected_row_index >= len(self.rows):
@@ -1518,8 +1621,8 @@ class ClipFlowWindow(QMainWindow):
 
     def _refresh_footer(self):
         self.total_label.setText(f"총 항목: {len(self.rows)}")
-        active = 1 if self.download_thread and self.download_thread.isRunning() else 0
-        self.concurrent_label.setText(f"동시 다운로드: {active}/1")
+        active = len(self.active_downloads)
+        self.concurrent_label.setText(f"동시 다운로드: {active}/{DOWNLOAD_CONCURRENCY}")
 
     def _set_status(self, message):
         self.status_label.setText(message)

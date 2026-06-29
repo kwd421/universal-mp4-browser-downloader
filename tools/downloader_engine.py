@@ -247,6 +247,61 @@ def output_dir_for_candidate(candidate, output_dir):
     return output_path / folder_name
 
 
+def final_output_path_for_candidate(candidate, output_dir):
+    if str((candidate or {}).get("media_type") or "").lower() == "playlist":
+        return None
+    output_ext = normalized_output_ext((candidate or {}).get("output_ext")) or "mp4"
+    return output_dir_for_candidate(candidate, output_dir) / f"{filename_stem_for_candidate(candidate)}.{output_ext}"
+
+
+def candidate_expected_size(candidate):
+    return safe_int(
+        (candidate or {}).get("sort_bytes")
+        or (candidate or {}).get("filesize")
+        or (candidate or {}).get("filesize_approx")
+    )
+
+
+def completed_output_exists(path, candidate):
+    if not path or not path.exists():
+        return False
+    try:
+        return path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def output_is_too_small_for_candidate(path, candidate, min_ratio=0.2):
+    expected_size = candidate_expected_size(candidate)
+    if not expected_size or expected_size < 1024 * 1024:
+        return False
+    try:
+        actual_size = path.stat().st_size
+    except OSError:
+        return True
+    return actual_size < expected_size * min_ratio
+
+
+def existing_output_path_for_candidate(candidate, output_dir):
+    output_path = final_output_path_for_candidate(candidate, output_dir)
+    if completed_output_exists(output_path, candidate) and not output_is_too_small_for_candidate(output_path, candidate):
+        return output_path
+    return None
+
+
+def remove_too_small_existing_output(candidate, output_dir, on_event=None):
+    output_path = final_output_path_for_candidate(candidate, output_dir)
+    if not completed_output_exists(output_path, candidate) or not output_is_too_small_for_candidate(output_path, candidate):
+        return False
+    try:
+        output_path.unlink()
+    except OSError as exc:
+        emit_event(on_event, "status", message=f"Could not replace partial file: {exc}")
+        return False
+    emit_event(on_event, "status", message=f"Replacing partial file: {output_path.name}")
+    return True
+
+
 def escape_yt_dlp_template_literal(value):
     return str(value).replace("%", "%%")
 
@@ -1402,6 +1457,18 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
         from yt_dlp import YoutubeDL
 
         ydl_factory = YoutubeDL
+
+    existing_output_path = existing_output_path_for_candidate(candidate, output_dir)
+    if existing_output_path:
+        emit_event(on_event, "status", message=f"File already exists: {existing_output_path.name}")
+        return {
+            "ok": True,
+            "skipped_existing": True,
+            "output_dir": str(Path(output_dir).expanduser()),
+            "output_path": str(existing_output_path),
+            "target_url": candidate.get("source") or page_url or candidate.get("url"),
+        }
+    remove_too_small_existing_output(candidate, output_dir, on_event=on_event)
 
     target_url = candidate.get("source") or page_url or candidate.get("url")
     if candidate.get("format_selector") == "best" and candidate.get("url"):

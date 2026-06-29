@@ -75,7 +75,7 @@ def row_info_text(candidate):
         return "1장"
     if kind == "playlist":
         count = engine.safe_int(candidate.get("item_count") or candidate.get("playlist_count"))
-        return f"영상 {count}개" if count else "재생목록"
+        return f"재생목록 {count}개" if count else "재생목록"
     seconds = engine.safe_int(candidate.get("duration"))
     if seconds:
         hours = seconds // 3600
@@ -277,7 +277,7 @@ class DownloadRowWidget(QFrame):
 
         self.actions_widget = RowActionOverlay(self)
         self.actions_widget.setObjectName("ActionOverlay")
-        self.actions_widget.setFixedWidth(ACTIONS_WIDTH + 84)
+        self.actions_widget.setMinimumWidth(ACTIONS_WIDTH)
         actions = QHBoxLayout(self.actions_widget)
         actions.setContentsMargins(24, 0, 16, 0)
         actions.setSpacing(4)
@@ -393,9 +393,10 @@ class DownloadRowWidget(QFrame):
 
     def _position_actions(self):
         inset = 1
-        width = self.actions_widget.width()
+        left = self.info_widget.x() if self.info_widget.x() > 0 else self.width() - self.actions_widget.width()
+        width = self.width() - left - inset
         self.actions_widget.setGeometry(
-            max(0, self.width() - width - inset), inset, width, self.height() - 2 * inset
+            max(0, left), inset, max(ACTIONS_WIDTH, width), self.height() - 2 * inset
         )
         self.actions_widget.raise_()
 
