@@ -149,10 +149,8 @@ class RowActionOverlay(QFrame):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect())
-        parent = self.parentWidget()
-        selected = parent is not None and parent.property("selected") == "true"
-        color = theme.SURFACE if selected else theme.SURFACE_SOFT
-        radius = 10.0
+        color = theme.SURFACE_SOFT
+        radius = 9.0
         path = QPainterPath()
         path.moveTo(rect.left(), rect.top())
         path.lineTo(rect.right() - radius, rect.top())
@@ -414,9 +412,9 @@ class DownloadRowWidget(QFrame):
     def _position_actions(self):
         inset = 1
         left = self.info_widget.x() if self.info_widget.x() > 0 else self.width() - self.actions_widget.width()
-        width = self.width() - left - inset
+        width = self.width() - left - inset - 1
         self.actions_widget.setGeometry(
-            max(0, left), inset, max(ACTIONS_WIDTH, width), self.height() - 2 * inset
+            max(0, left), inset, max(ACTIONS_WIDTH, width), max(0, self.height() - 2 * inset - 1)
         )
         self.actions_widget.raise_()
 
@@ -454,7 +452,8 @@ class DownloadRowWidget(QFrame):
         self.owner.delete_file_for_row(self.row)
 
     def set_selected(self, selected):
-        self.setProperty("selected", "true" if selected else "false")
+        del selected
+        self.setProperty("selected", "false")
         self._repolish()
 
     def _repolish(self):

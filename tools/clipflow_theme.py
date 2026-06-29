@@ -104,15 +104,15 @@ QFrame#DownloadRow {{
 }}
 QFrame#DownloadRow[selected="true"] {{
     background: {SURFACE};
-    border-color: {ACCENT};
+    border-color: {BORDER};
 }}
 QFrame#DownloadRow[hovered="true"] {{
     background: {SURFACE_SOFT};
     border-color: {BORDER_STRONG};
 }}
 QFrame#DownloadRow[selected="true"][hovered="true"] {{
-    background: {SURFACE};
-    border-color: {ACCENT};
+    background: {SURFACE_SOFT};
+    border-color: {BORDER_STRONG};
 }}
 QWidget#RowContainer {{
     background: transparent;

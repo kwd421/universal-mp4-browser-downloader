@@ -331,7 +331,6 @@ class ClipFlowWindow(QMainWindow):
         layout.addWidget(self._build_header())
         layout.addWidget(self._build_input_panel())
         layout.addWidget(self._build_list_panel(), 1)
-        layout.addWidget(self._build_footer())
         self.setCentralWidget(root)
 
     def _build_header(self):
@@ -537,6 +536,7 @@ class ClipFlowWindow(QMainWindow):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._refresh_playlist_float_button)
         self.row_container = QWidget()
         self.row_container.setObjectName("RowContainer")
@@ -760,8 +760,15 @@ class ClipFlowWindow(QMainWindow):
 
     def _completed_history_payload(self):
         payload = []
-        for row in self._dedupe_playlist_parent_rows(list(self.rows)):
-            if row.get("status") != "완료":
+        rows = self._dedupe_playlist_parent_rows(list(self.rows))
+        for row in rows:
+            include_playlist_parent = False
+            if row.get("kind") == "playlist":
+                children = [child for child in rows if child.get("parent_playlist_id") == row.get("id")]
+                include_playlist_parent = any(child.get("status") == COMPLETED_STATUS for child in children)
+                if include_playlist_parent:
+                    self._refresh_playlist_parent_metadata(row)
+            if row.get("status") != COMPLETED_STATUS and not include_playlist_parent:
                 continue
             candidate = row.get("candidate") or {}
             payload.append(
@@ -833,11 +840,85 @@ class ClipFlowWindow(QMainWindow):
                 }
             )
         if restored:
+            repaired_missing_parents = self._restore_missing_playlist_parents(restored)
             restored = self._dedupe_playlist_parent_rows(restored)
             self._attach_restored_playlist_children(restored)
             restored = self._dedupe_playlist_parent_rows(restored)
             self.rows = restored + self.rows
             self._render_rows()
+            if repaired_missing_parents:
+                self._save_completed_history()
+
+    def _restore_missing_playlist_parents(self, rows):
+        existing_ids = {row.get("id") for row in rows if row.get("kind") == "playlist"}
+        missing_groups = {}
+        for row in rows:
+            parent_id = row.get("parent_playlist_id")
+            if not row.get("is_playlist_child") or not parent_id or parent_id in existing_ids:
+                continue
+            missing_groups.setdefault(parent_id, []).append(row)
+        repaired = False
+        for parent_id, children in missing_groups.items():
+            key = next((child.get("playlist_key") for child in children if child.get("playlist_key")), "")
+            output_dirs = []
+            for child in children:
+                output_path = child.get("output_path") or ""
+                if output_path:
+                    output_dirs.append(Path(output_path).expanduser().parent)
+            common_dir = output_dirs[0] if output_dirs and all(path == output_dirs[0] for path in output_dirs) else None
+            title = common_dir.name if common_dir else "재생목록"
+            source_url = key if str(key).startswith(("http://", "https://")) else ""
+            preferred_ext = self._preferred_output_ext()
+            candidate = {
+                "id": parent_id,
+                "media_type": "playlist",
+                "format_selector": "bestvideo*+bestaudio/best",
+                "title": title,
+                "display_title": title,
+                "thumbnail": (children[0].get("candidate") or {}).get("thumbnail") or "",
+                "duration": sum(engine.safe_int((child.get("candidate") or {}).get("duration")) for child in children),
+                "sort_bytes": sum(engine.safe_int((child.get("candidate") or {}).get("sort_bytes")) for child in children),
+                "item_count": len(children),
+                "playlist_count": len(children),
+                "source": source_url,
+                "url": source_url,
+                "webpage_url": source_url,
+                "output_ext": preferred_ext,
+                "ext": preferred_ext,
+            }
+            created_orders = [engine.safe_int(child.get("created_order")) for child in children]
+            created_order = max(0, min(order for order in created_orders if order) - 1) if any(created_orders) else self._next_row_sequence()
+            rows.append(
+                {
+                    "id": parent_id,
+                    "kind": "playlist",
+                    "candidate": candidate,
+                    "qualities": [candidate],
+                    "quality_options": build_quality_options([candidate]),
+                    "selected_index": 0,
+                    "selected_format_index": 0,
+                    "analysis_source_url": source_url,
+                    "source_url": source_url,
+                    "playlist_key": key,
+                    "parent_playlist_id": "",
+                    "is_playlist_child": False,
+                    "playlist_child_index": 0,
+                    "expanded": True,
+                    "status": COMPLETED_STATUS,
+                    "status_detail": "",
+                    "progress": 100,
+                    "progress_text": "",
+                    "output_path": "",
+                    "messages": [],
+                    "created_order": created_order,
+                    "playlist_entries": [
+                        {"candidate": child.get("candidate") or {}, "qualities": child.get("qualities") or []}
+                        for child in children
+                    ],
+                }
+            )
+            repaired = True
+        return repaired
 
     def _attach_restored_playlist_children(self, rows):
         parents_by_key = {}
@@ -2137,7 +2218,8 @@ class ClipFlowWindow(QMainWindow):
             return
         message = event.get("message") or event.get("path") or ""
         if event_type in {"progress", "status"}:
-            self.status_label.setText(message or "분석 중")
+            if hasattr(self, "status_label"):
+                self.status_label.setText(message or "분석 중")
             if message:
                 self.event_messages.append(message)
         elif event_type in {"log", "done", "file"} and message:
@@ -2368,7 +2450,8 @@ class ClipFlowWindow(QMainWindow):
             if widget:
                 widget.set_status("다운로드 중")
                 widget.set_progress(percent, text)
-            self.status_label.setText(text or "다운로드 중")
+            if hasattr(self, "status_label"):
+                self.status_label.setText(text or "다운로드 중")
         elif event_type == "file":
             if row and event.get("path"):
                 row["output_path"] = str(event["path"])
@@ -2376,7 +2459,8 @@ class ClipFlowWindow(QMainWindow):
                     widget._refresh_actions()
         elif event_type == "status":
             if message:
-                self.status_label.setText(message)
+                if hasattr(self, "status_label"):
+                    self.status_label.setText(message)
                 self.event_messages.append(message)
         elif event_type in {"log", "done"}:
             if message:
@@ -2705,12 +2789,11 @@ class ClipFlowWindow(QMainWindow):
         return current_url in row_urls
 
     def _refresh_footer(self):
-        self.total_label.setText(f"총 항목: {len(self.rows)}")
-        active = len(self.active_downloads)
-        self.concurrent_label.setText(f"동시 다운로드: {active}/{DOWNLOAD_CONCURRENCY}")
+        return
 
     def _set_status(self, message):
-        self.status_label.setText(message)
+        if hasattr(self, "status_label"):
+            self.status_label.setText(message)
         self.event_messages.append(message)
 
 

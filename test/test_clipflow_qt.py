@@ -7,8 +7,14 @@ import uuid
 
 
 def run_qt_script(script, timeout=10):
+    settings_org = f"ClipFlowTestOrg{uuid.uuid4().hex}"
     settings_app = f"ClipFlowTest{uuid.uuid4().hex}"
-    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "CLIPFLOW_SETTINGS_APP": settings_app}
+    env = {
+        **os.environ,
+        "QT_QPA_PLATFORM": "offscreen",
+        "CLIPFLOW_SETTINGS_ORG": settings_org,
+        "CLIPFLOW_SETTINGS_APP": settings_app,
+    }
     with tempfile.TemporaryDirectory() as settings_dir:
         isolated_script = (
             "import atexit, os\n"
@@ -1087,6 +1093,9 @@ print(row_widget.item_widget.maximumWidth() > 10000)
 print(",".join(str(widget.width()) for widget in fixed_column_widgets))
 print(f"{window.minimumWidth()}x{window.minimumHeight()}")
 print(window.scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff)
+print(window.scroll_area.verticalScrollBarPolicy() == Qt.ScrollBarAlwaysOn)
+print(hasattr(window, "status_label"))
+print(len(window.findChildren(QFrame, "FooterDivider")))
 fresh = ClipFlowWindow()
 print(f"{fresh.width()}x{fresh.height()}")
 '''
@@ -1095,7 +1104,7 @@ print(f"{fresh.width()}x{fresh.height()}")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["0", "True", "84,92,230", "560x420", "True", "720x760"],
+            ["0", "True", "84,92,229", "560x420", "True", "True", "False", "0", "720x760"],
         )
 
     def test_clipflow_qt_sort_label_aligns_with_sort_controls(self):
@@ -1854,6 +1863,36 @@ print(QColor(pixmap.toImage().pixelColor(0, 0)).name().upper() == theme.SURFACE_
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True"])
+
+    def test_clipflow_qt_row_selection_has_no_visible_selected_state(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_theme import APP_STYLE
+
+app = QApplication([])
+window = ClipFlowWindow()
+row = {
+    "candidate": {"id": "one", "title": "One", "source": "https://media.test/one", "url": "https://media.test/one"},
+    "qualities": [],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "source_url": "https://media.test/one",
+    "status": "완료",
+    "messages": [],
+}
+window.rows = [row]
+window._render_rows()
+widget = row["widget"]
+widget.set_selected(True)
+print(widget.property("selected"))
+print('QFrame#DownloadRow[selected="true"]' in APP_STYLE and "border-color: #0070F3" in APP_STYLE.split('QFrame#DownloadRow[selected="true"]', 1)[1].split("}", 1)[0])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["false", "False"])
 
     def test_clipflow_qt_download_button_stays_enabled_while_download_runs(self):
         script = r'''
@@ -2803,6 +2842,131 @@ print(parent["widget"].progress_text.text())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["완료", "100", "", ""])
 
+    def test_clipflow_qt_completed_history_saves_playlist_parent_with_completed_children(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS, DOWNLOAD_STATUS
+
+app = QApplication([])
+window = ClipFlowWindow()
+parent = {
+    "id": "playlist-1",
+    "kind": "playlist",
+    "candidate": {"id": "playlist-1", "media_type": "playlist", "title": "Road Mix", "display_title": "Road Mix", "source": "https://media.test/playlist/road", "url": "https://media.test/playlist/road", "duration": 180, "sort_bytes": 30, "item_count": 2, "playlist_count": 2, "output_ext": "mp4", "ext": "mp4"},
+    "qualities": [],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "analysis_source_url": "https://media.test/playlist/road",
+    "source_url": "https://media.test/playlist/road",
+    "playlist_key": "playlist:road",
+    "status": DOWNLOAD_STATUS,
+    "status_detail": "1/2",
+    "progress": 50,
+    "progress_text": "50%",
+    "output_path": "",
+    "messages": [],
+    "created_order": 1,
+    "expanded": True,
+    "playlist_entries": [],
+}
+child = {
+    "id": "playlist-1-child-1",
+    "kind": "video",
+    "candidate": {"id": "one", "title": "One", "display_title": "One", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "duration": 60, "sort_bytes": 10, "ext": "mp4", "output_ext": "mp4"},
+    "qualities": [],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "analysis_source_url": "https://media.test/watch/1",
+    "source_url": "https://media.test/watch/1",
+    "playlist_key": "playlist:road",
+    "parent_playlist_id": "playlist-1",
+    "is_playlist_child": True,
+    "playlist_child_index": 1,
+    "status": COMPLETED_STATUS,
+    "status_detail": "",
+    "progress": 100,
+    "progress_text": "",
+    "output_path": "C:/Temp/One.mp4",
+    "messages": [],
+    "created_order": 2,
+}
+window.rows = [parent, child]
+payload = window._completed_history_payload()
+print(len(payload))
+print([item.get("candidate", {}).get("media_type") for item in payload])
+parent = next((item for item in payload if item.get("candidate", {}).get("media_type") == "playlist"), None)
+child_payload = next((item for item in payload if item.get("is_playlist_child")), None)
+print(parent is not None)
+print(bool(parent and child_payload and child_payload["parent_playlist_id"] == parent["candidate"]["id"]))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["2", "['playlist', None]", "True", "True"])
+
+    def test_clipflow_qt_restores_orphan_playlist_children_with_synthetic_parent(self):
+        script = r'''
+import json
+import os
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, DOWNLOAD_HISTORY_SETTING
+
+app = QApplication([])
+settings = QSettings(os.environ.get("CLIPFLOW_SETTINGS_ORG", "ClipFlow"), os.environ.get("CLIPFLOW_SETTINGS_APP", "ClipFlow"))
+settings.setValue(DOWNLOAD_HISTORY_SETTING, json.dumps([
+    {
+        "candidate": {"id": "one", "title": "One", "display_title": "One", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "duration": 60, "sort_bytes": 10, "ext": "mp4", "output_ext": "mp4"},
+        "source_url": "https://media.test/watch/1",
+        "analysis_source_url": "https://media.test/watch/1",
+        "playlist_key": "playlist:road",
+        "parent_playlist_id": "playlist-missing",
+        "is_playlist_child": True,
+        "playlist_child_index": 1,
+        "output_path": "C:/Temp/One.mp4",
+        "created_order": 2,
+        "messages": [],
+    },
+    {
+        "candidate": {"id": "two", "title": "Two", "display_title": "Two", "source": "https://media.test/watch/2", "url": "https://media.test/watch/2", "duration": 120, "sort_bytes": 20, "ext": "mp4", "output_ext": "mp4"},
+        "source_url": "https://media.test/watch/2",
+        "analysis_source_url": "https://media.test/watch/2",
+        "playlist_key": "playlist:road",
+        "parent_playlist_id": "playlist-missing",
+        "is_playlist_child": True,
+        "playlist_child_index": 2,
+        "output_path": "C:/Temp/Two.mp4",
+        "created_order": 3,
+        "messages": [],
+    },
+], ensure_ascii=False))
+settings.sync()
+window = ClipFlowWindow()
+persisted = json.loads(settings.value(DOWNLOAD_HISTORY_SETTING, "[]", str) or "[]")
+print([(row.get("kind"), row.get("is_playlist_child"), row.get("parent_playlist_id")) for row in window.rows])
+print(len(window._visible_rows()))
+print(window.count_label.text())
+print(window.rows[0]["candidate"]["item_count"])
+print(window.rows[0]["candidate"]["duration"])
+print(sum(1 for item in persisted if item.get("candidate", {}).get("media_type") == "playlist"))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "[('playlist', False, ''), ('video', True, 'playlist-missing'), ('video', True, 'playlist-missing')]",
+                "3",
+                "3개",
+                "2",
+                "180",
+                "1",
+            ],
+        )
+
     def test_clipflow_qt_playlist_child_uses_parent_folder_existing_file(self):
         script = r'''
 from pathlib import Path
@@ -3636,7 +3800,7 @@ app.processEvents()
 row = next(row for row in window.rows if row.get("kind") == "playlist")
 bar = window.scroll_area.verticalScrollBar()
 row_top_in_content = row["render_widget"].mapTo(window.row_container, QPoint(0, 0)).y()
-bar.setValue(max(bar.minimum(), min(bar.maximum(), row_top_in_content - 40)))
+bar.setValue(max(bar.minimum(), min(bar.maximum(), row_top_in_content - 90)))
 app.processEvents()
 before = row["render_widget"].mapTo(window.scroll_area.viewport(), QPoint(0, 0)).y()
 row["expanded"] = False
