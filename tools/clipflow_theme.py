@@ -540,3 +540,12 @@ DOWNLOAD_STATUS = "다운로드 중"
 COMPLETED_STATUS = "완료"
 ERROR_STATUS = "오류"
 AUTO_LABEL = "자동"
+
+
+def cookie_source_from_display(display_text):
+    text = str(display_text or "").strip()
+    if text in COOKIE_DISPLAY_TO_SOURCE:
+        return COOKIE_DISPLAY_TO_SOURCE[text]
+    if text.startswith("쿠키:"):
+        text = text.split(":", 1)[1].strip()
+    return text or "없음"
