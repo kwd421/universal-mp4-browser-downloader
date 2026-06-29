@@ -5,16 +5,32 @@ operate on ``self`` (the ClipFlowWindow instance) and only rely on the module
 imports below plus methods that remain on the window class.
 """
 
+from pathlib import Path
+
 try:
     from tools import candidate_presenter as presenter
     from tools import downloader_engine as engine
-    from tools.clipflow_rows import build_quality_options
-    from tools.clipflow_theme import ERROR_STATUS
+    from tools.clipflow_rows import build_quality_options, row_kind, row_source_url
+    from tools.clipflow_theme import (
+        ANALYZING_STATUS,
+        COMPLETED_STATUS,
+        DOWNLOAD_STATUS,
+        ERROR_STATUS,
+        READY_STATUS,
+        WAITING_STATUS,
+    )
 except ImportError:
     import candidate_presenter as presenter
     import downloader_engine as engine
-    from clipflow_rows import build_quality_options
-    from clipflow_theme import ERROR_STATUS
+    from clipflow_rows import build_quality_options, row_kind, row_source_url
+    from clipflow_theme import (
+        ANALYZING_STATUS,
+        COMPLETED_STATUS,
+        DOWNLOAD_STATUS,
+        ERROR_STATUS,
+        READY_STATUS,
+        WAITING_STATUS,
+    )
 
 
 class PlaylistMixin:
@@ -297,3 +313,415 @@ class PlaylistMixin:
                 row["playlist_key"] = key_by_parent_id.get(replacement_id) or row.get("playlist_key") or ""
             deduped.append(row)
         return deduped
+
+    def _playlist_parent_row_from_analysis(self, analysis, grouped_rows, source_url, parent_id=None):
+        created_order = self._next_row_sequence()
+        parent_id = parent_id or f"playlist-{created_order}"
+        playlist_candidate = self._playlist_candidate_from_analysis(analysis, grouped_rows, source_url)
+        playlist_candidate["id"] = parent_id
+        return {
+            "id": parent_id,
+            "kind": "playlist",
+            "candidate": playlist_candidate,
+            "qualities": [playlist_candidate],
+            "quality_options": build_quality_options([playlist_candidate]),
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": source_url,
+            "source_url": source_url,
+            "input_url": analysis.get("url") or source_url,
+            "status": READY_STATUS,
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": "",
+            "output_path": "",
+            "messages": [],
+            "created_order": created_order,
+            "playlist_entries": grouped_rows,
+            "expanded": True,
+            "playlist_key": self._playlist_key(analysis.get("url") or source_url),
+        }
+
+    def _playlist_child_rows_from_grouped(self, parent, grouped_rows, analysis, source_url):
+        children = []
+        for index, grouped_row in enumerate(grouped_rows, start=1):
+            child = self._video_row_from_grouped(grouped_row, analysis, source_url)
+            child["id"] = f"{parent['id']}-child-{index}"
+            child["parent_playlist_id"] = parent["id"]
+            child["is_playlist_child"] = True
+            child["playlist_child_index"] = index
+            child["playlist_key"] = parent.get("playlist_key")
+            child["source_url"] = row_source_url(analysis, child.get("candidate") or {}) or child.get("source_url") or source_url
+            children.append(child)
+        return children
+
+    def _find_playlist_parent_for_analysis(self, analysis, source_url):
+        return self._find_playlist_parent_for_url(analysis.get("url") or source_url)
+
+    def _find_playlist_parent_for_url(self, url):
+        key = self._playlist_key(url)
+        if not key:
+            return None
+        for row in self.rows:
+            if row.get("kind") == "playlist" and self._playlist_key_for_row(row) == key:
+                return row
+        return None
+
+    def _update_playlist_rows(self, parent, analysis, grouped_rows, source_url):
+        parent_id = parent.get("id")
+        if not parent_id:
+            return
+        replacement = self._playlist_parent_row_from_analysis(analysis, grouped_rows, source_url, parent_id=parent_id)
+        replacement["created_order"] = parent.get("created_order") or replacement.get("created_order")
+        replacement["expanded"] = parent.get("expanded", True)
+        parent.clear()
+        parent.update(replacement)
+        existing_children = {
+            self._row_media_identity(row): row
+            for row in self.rows
+            if row.get("parent_playlist_id") == parent_id
+        }
+        children = []
+        for child in self._playlist_child_rows_from_grouped(parent, grouped_rows, analysis, source_url):
+            existing = existing_children.get(self._row_media_identity(child))
+            if existing:
+                child["id"] = existing.get("id") or child.get("id")
+                child["created_order"] = existing.get("created_order") or child.get("created_order")
+                if existing.get("status") in {COMPLETED_STATUS, DOWNLOAD_STATUS, WAITING_STATUS}:
+                    for key in ("status", "status_detail", "progress", "progress_text", "output_path", "messages", "download_started_at"):
+                        child[key] = existing.get(key, child.get(key))
+                child["widget"] = existing.get("widget")
+            children.append(child)
+        self.rows = [row for row in self.rows if row.get("parent_playlist_id") != parent_id]
+        insert_index = self.rows.index(parent) + 1 if parent in self.rows else 0
+        for child in reversed(children):
+            self.rows.insert(insert_index, child)
+
+    def _finalize_progressive_playlist_rows(self, parent, analysis, grouped_rows, source_url):
+        parent_id = parent.get("id")
+        if not parent_id:
+            return
+        replacement = self._playlist_parent_row_from_analysis(analysis, grouped_rows, source_url, parent_id=parent_id)
+        replacement["created_order"] = parent.get("created_order") or replacement.get("created_order")
+        replacement["expanded"] = parent.get("expanded", True)
+        replacement["widget"] = parent.get("widget")
+        replacement["render_widget"] = parent.get("render_widget")
+        parent.clear()
+        parent.update(replacement)
+        parent["analysis_loading"] = False
+        self.rows = [
+            row
+            for row in self.rows
+            if not (row.get("parent_playlist_id") == parent_id and row.get("child_loading"))
+        ]
+        self._refresh_playlist_parent_status(parent)
+
+    def _row_media_identity(self, row):
+        candidate = row.get("candidate") or {}
+        return (
+            candidate.get("source")
+            or candidate.get("webpage_url")
+            or candidate.get("url")
+            or row.get("source_url")
+            or row.get("id")
+            or ""
+        )
+
+    def _video_row_from_grouped(self, grouped_row, analysis, source_url):
+        candidate = grouped_row["candidate"]
+        return {
+            "id": grouped_row.get("id"),
+            "kind": row_kind(candidate),
+            "candidate": candidate,
+            "qualities": grouped_row["qualities"],
+            "quality_options": build_quality_options(grouped_row["qualities"]),
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": source_url,
+            "source_url": source_url or row_source_url(analysis, candidate),
+            "input_url": analysis.get("url") or source_url,
+            "status": READY_STATUS,
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": "",
+            "output_path": "",
+            "messages": [],
+            "created_order": self._next_row_sequence(),
+        }
+
+    def _playlist_candidate_from_analysis(self, analysis, grouped_rows, source_url):
+        first_candidate = (grouped_rows[0].get("candidate") if grouped_rows else {}) or {}
+        candidates = [row.get("candidate") or {} for row in grouped_rows]
+        title = (
+            analysis.get("playlist_title")
+            or analysis.get("title")
+            or first_candidate.get("display_title")
+            or first_candidate.get("title")
+            or "Playlist"
+        )
+        return {
+            "id": "playlist",
+            "media_type": "playlist",
+            "format_selector": "bestvideo*+bestaudio/best",
+            "title": title,
+            "display_title": title,
+            "thumbnail": first_candidate.get("thumbnail") or "",
+            "duration": sum(engine.safe_int(candidate.get("duration")) for candidate in candidates),
+            "sort_bytes": sum(engine.safe_int(candidate.get("sort_bytes")) for candidate in candidates),
+            "item_count": engine.safe_int(analysis.get("playlist_count")) or len(grouped_rows),
+            "playlist_count": engine.safe_int(analysis.get("playlist_count")) or len(grouped_rows),
+            "source": source_url,
+            "url": source_url,
+            "webpage_url": source_url,
+            "output_ext": self._preferred_output_ext(),
+            "ext": self._preferred_output_ext(),
+        }
+
+    def _refresh_playlist_parent_metadata(self, parent):
+        if not parent or parent.get("kind") != "playlist":
+            return
+        candidate = parent.get("candidate") or {}
+        children = [
+            row
+            for row in self._playlist_children_for_parent(parent)
+            if not row.get("child_loading")
+        ]
+        count = len(children)
+        if parent.get("analysis_loading"):
+            expected = engine.safe_int(candidate.get("playlist_count") or candidate.get("item_count"))
+            count = max(count, expected)
+        candidate["duration"] = sum(engine.safe_int((child.get("candidate") or {}).get("duration")) for child in children)
+        candidate["sort_bytes"] = sum(engine.safe_int((child.get("candidate") or {}).get("sort_bytes")) for child in children)
+        candidate["item_count"] = count
+        candidate["playlist_count"] = count
+        parent["playlist_entries"] = [
+            {"candidate": child.get("candidate") or {}, "qualities": child.get("qualities") or []}
+            for child in children
+        ]
+
+    def _parent_playlist_for_child(self, child_row):
+        parent_id = child_row.get("parent_playlist_id")
+        if not parent_id:
+            return None
+        for row in self.rows:
+            if row.get("id") == parent_id:
+                return row
+        return None
+
+    def _restore_missing_playlist_parents(self, rows):
+        existing_ids = {row.get("id") for row in rows if row.get("kind") == "playlist"}
+        missing_groups = {}
+        for row in rows:
+            parent_id = row.get("parent_playlist_id")
+            if not row.get("is_playlist_child") or not parent_id or parent_id in existing_ids:
+                continue
+            missing_groups.setdefault(parent_id, []).append(row)
+        repaired = False
+        for parent_id, children in missing_groups.items():
+            key = next((child.get("playlist_key") for child in children if child.get("playlist_key")), "")
+            output_dirs = []
+            for child in children:
+                output_path = child.get("output_path") or ""
+                if output_path:
+                    output_dirs.append(Path(output_path).expanduser().parent)
+            common_dir = output_dirs[0] if output_dirs and all(path == output_dirs[0] for path in output_dirs) else None
+            title = common_dir.name if common_dir else "재생목록"
+            source_url = key if str(key).startswith(("http://", "https://")) else ""
+            preferred_ext = self._preferred_output_ext()
+            candidate = {
+                "id": parent_id,
+                "media_type": "playlist",
+                "format_selector": "bestvideo*+bestaudio/best",
+                "title": title,
+                "display_title": title,
+                "thumbnail": (children[0].get("candidate") or {}).get("thumbnail") or "",
+                "duration": sum(engine.safe_int((child.get("candidate") or {}).get("duration")) for child in children),
+                "sort_bytes": sum(engine.safe_int((child.get("candidate") or {}).get("sort_bytes")) for child in children),
+                "item_count": len(children),
+                "playlist_count": len(children),
+                "source": source_url,
+                "url": source_url,
+                "webpage_url": source_url,
+                "output_ext": preferred_ext,
+                "ext": preferred_ext,
+            }
+            created_orders = [engine.safe_int(child.get("created_order")) for child in children]
+            created_order = max(0, min(order for order in created_orders if order) - 1) if any(created_orders) else self._next_row_sequence()
+            rows.append(
+                {
+                    "id": parent_id,
+                    "kind": "playlist",
+                    "candidate": candidate,
+                    "qualities": [candidate],
+                    "quality_options": build_quality_options([candidate]),
+                    "selected_index": 0,
+                    "selected_format_index": 0,
+                    "analysis_source_url": source_url,
+                    "source_url": source_url,
+                    "playlist_key": key,
+                    "parent_playlist_id": "",
+                    "is_playlist_child": False,
+                    "playlist_child_index": 0,
+                    "expanded": True,
+                    "status": COMPLETED_STATUS,
+                    "status_detail": "",
+                    "progress": 100,
+                    "progress_text": "",
+                    "output_path": "",
+                    "messages": [],
+                    "created_order": created_order,
+                    "playlist_entries": [
+                        {"candidate": child.get("candidate") or {}, "qualities": child.get("qualities") or []}
+                        for child in children
+                    ],
+                }
+            )
+            repaired = True
+        return repaired
+
+    def _attach_restored_playlist_children(self, rows):
+        parents_by_key = {}
+        for row in rows:
+            if row.get("kind") != "playlist":
+                continue
+            key = self._playlist_key_for_row(row)
+            if key and key not in parents_by_key:
+                parents_by_key[key] = row
+        child_counts = {}
+        for row in rows:
+            if row.get("kind") == "playlist" or row.get("is_playlist_child"):
+                continue
+            key = self._playlist_key_for_row(row)
+            parent = parents_by_key.get(key)
+            if not parent:
+                continue
+            parent_id = parent.get("id")
+            child_counts[parent_id] = child_counts.get(parent_id, 0) + 1
+            row["parent_playlist_id"] = parent_id
+            row["is_playlist_child"] = True
+            row["playlist_child_index"] = child_counts[parent_id]
+            row["playlist_key"] = key
+
+    def _playlist_parent_loading_row(self, url):
+        created_order = self._next_row_sequence()
+        parent_id = f"playlist-loading-{created_order}"
+        candidate = self._placeholder_candidate(url)
+        candidate.update(
+            {
+                "id": parent_id,
+                "media_type": "playlist",
+                "format_selector": "bestvideo*+bestaudio/best",
+                "item_count": 0,
+                "playlist_count": 0,
+                "source": url,
+                "webpage_url": url,
+            }
+        )
+        return {
+            "id": parent_id,
+            "kind": "playlist",
+            "candidate": candidate,
+            "qualities": [candidate],
+            "quality_options": build_quality_options([candidate]),
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": url,
+            "source_url": url,
+            "input_url": url,
+            "status": READY_STATUS,
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": "",
+            "output_path": "",
+            "messages": [],
+            "created_order": created_order,
+            "playlist_entries": [],
+            "expanded": True,
+            "analysis_loading": True,
+        }
+
+    def _playlist_child_loading_row(self, parent_id, url):
+        return {
+            "id": f"{parent_id}-loading",
+            "kind": "video",
+            "candidate": self._placeholder_candidate(url),
+            "qualities": [],
+            "quality_options": [],
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": url,
+            "source_url": url,
+            "input_url": url,
+            "status": ANALYZING_STATUS,
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": ANALYZING_STATUS,
+            "output_path": "",
+            "messages": [],
+            "created_order": self._next_row_sequence(),
+            "parent_playlist_id": parent_id,
+            "is_playlist_child": True,
+            "child_loading": True,
+            "analysis_loading": True,
+            "playlist_child_index": 0,
+        }
+
+    def _playlist_parent_needs_child_analysis(self, row):
+        if not isinstance(row, dict) or row.get("kind") != "playlist":
+            return False
+        if row.get("analysis_loading") or self.analysis_thread:
+            return False
+        if self._playlist_children_for_parent(row):
+            return False
+        return bool(self._playlist_source_url(row))
+
+    def _playlist_source_url(self, row):
+        if not isinstance(row, dict):
+            return ""
+        candidate = row.get("candidate") or {}
+        return str(
+            row.get("analysis_source_url")
+            or row.get("source_url")
+            or row.get("input_url")
+            or candidate.get("webpage_url")
+            or candidate.get("url")
+            or candidate.get("source")
+            or ""
+        ).strip()
+
+    def _first_playlist_output_parent(self, row):
+        for entry in row.get("playlist_entries") or []:
+            child = entry if isinstance(entry, dict) else {}
+            saved_output = child.get("output_path") or ""
+            output_path = Path(saved_output)
+            if saved_output and output_path.exists():
+                return output_path.parent
+            candidate = child.get("candidate") if isinstance(child.get("candidate"), dict) else None
+            expected = engine.existing_output_path_for_candidate(candidate or {}, self.folder_input.text())
+            if expected:
+                return expected.parent
+        return None
+
+    def _delete_playlist_output_files(self, row, playlist_dir):
+        playlist_dir = Path(playlist_dir).expanduser()
+        paths = []
+        for child in self._playlist_children_for_parent(row):
+            saved_output = child.get("output_path") or ""
+            if saved_output:
+                path = Path(saved_output).expanduser()
+            else:
+                path = engine.existing_output_path_for_candidate(child.get("candidate") or {}, playlist_dir)
+            if path and path.exists() and path.is_file():
+                try:
+                    path.relative_to(playlist_dir)
+                except ValueError:
+                    continue
+                paths.append(path)
+        for path in dict.fromkeys(paths):
+            path.unlink()
+        save_folder = Path(self.folder_input.text()).expanduser().resolve()
+        if playlist_dir.exists() and playlist_dir.resolve() != save_folder:
+            try:
+                playlist_dir.rmdir()
+            except OSError:
+                pass
