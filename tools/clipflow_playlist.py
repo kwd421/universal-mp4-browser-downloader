@@ -224,3 +224,76 @@ class PlaylistMixin:
         insert_index = self.rows.index(parent) + 1 if parent in self.rows else len(self.rows)
         for row in reversed(children + loading_rows):
             self.rows.insert(insert_index, row)
+
+    def _playlist_key(self, url):
+        return engine.playlist_identity_key(url)
+
+    def _playlist_key_for_row(self, row):
+        if not row:
+            return ""
+        candidate = row.get("candidate") or {}
+        return (
+            row.get("playlist_key")
+            or self._playlist_key(row.get("input_url") or "")
+            or self._playlist_key(row.get("analysis_source_url") or "")
+            or self._playlist_key(row.get("source_url") or "")
+            or self._playlist_key(candidate.get("webpage_url") or "")
+            or self._playlist_key(candidate.get("url") or "")
+            or self._playlist_key(candidate.get("source") or "")
+        )
+
+    def _playlist_group_key_for_row(self, row):
+        if not isinstance(row, dict):
+            return ""
+        key = self._playlist_key_for_row(row)
+        if key:
+            return key
+        candidate = row.get("candidate") or {}
+        return str(
+            row.get("analysis_source_url")
+            or row.get("source_url")
+            or row.get("input_url")
+            or candidate.get("webpage_url")
+            or candidate.get("url")
+            or candidate.get("source")
+            or ""
+        ).strip()
+
+    def _dedupe_playlist_parent_rows(self, rows):
+        keep_by_key = {}
+        key_by_parent_id = {}
+        replace_parent_ids = {}
+        duplicate_parent_ids = set()
+        for row in rows:
+            if row.get("kind") != "playlist":
+                continue
+            key = self._playlist_group_key_for_row(row)
+            if not key:
+                continue
+            row["playlist_key"] = key
+            row_id = row.get("id")
+            if row_id:
+                key_by_parent_id[row_id] = key
+            current = keep_by_key.get(key)
+            if current is None or int(row.get("created_order") or 0) >= int(current.get("created_order") or 0):
+                if current and current.get("id"):
+                    duplicate_parent_ids.add(current.get("id"))
+                    replace_parent_ids[current.get("id")] = row_id
+                keep_by_key[key] = row
+            else:
+                if row_id:
+                    duplicate_parent_ids.add(row_id)
+                    replace_parent_ids[row_id] = current.get("id")
+        if not duplicate_parent_ids:
+            return rows
+        deduped = []
+        for row in rows:
+            if row.get("kind") == "playlist" and row.get("id") in duplicate_parent_ids:
+                continue
+            parent_id = row.get("parent_playlist_id")
+            replacement_id = replace_parent_ids.get(parent_id)
+            if replacement_id:
+                row["parent_playlist_id"] = replacement_id
+                row["playlist_key"] = key_by_parent_id.get(replacement_id) or row.get("playlist_key") or ""
+            deduped.append(row)
+        return deduped
