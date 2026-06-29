@@ -38,6 +38,8 @@ try:
     )
     from tools.clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
     from tools.clipflow_widgets import CleanCheckBox, CleanComboBox, ClearingUrlInput, ComboPopup, PathDisplayInput, PrimaryActionButton
+    from tools.clipflow_workers import AnalyzeWorker, DownloadWorker
+    from tools.clipflow_dialogs import DeleteConfirmDialog, PreferencesDialog, _combo_text
 except ImportError:
     import candidate_presenter as presenter
     import downloader_engine as engine
@@ -49,38 +51,15 @@ except ImportError:
     )
     from clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
     from clipflow_widgets import CleanCheckBox, CleanComboBox, ClearingUrlInput, ComboPopup, PathDisplayInput, PrimaryActionButton
+    from clipflow_workers import AnalyzeWorker, DownloadWorker
+    from clipflow_dialogs import DeleteConfirmDialog, PreferencesDialog, _combo_text
 
-
-SETTINGS_ORG = os.environ.get("CLIPFLOW_SETTINGS_ORG", "ClipFlow")
-SETTINGS_APP = os.environ.get("CLIPFLOW_SETTINGS_APP", "ClipFlow")
-SAVE_FOLDER_SETTING = "save_folder"
-COOKIE_SOURCE_SETTING = "cookie_source"
-DOWNLOAD_HISTORY_SETTING = "download_history"
-PREF_QUALITY_SETTING = "download_quality"
-PREF_FORMAT_SETTING = "download_format"
-PREF_CODEC_SETTING = "download_codec"
-PREF_FRAME_SETTING = "download_frame"
-SORT_KEY_SETTING = "sort_key"
-SORT_DESC_SETTING = "sort_desc"
-
-PREFERENCE_DEFAULTS = {
-    "quality": "자동",
-    "output_format": "자동",
-    "codec": "자동",
-    "frame_rate": "자동",
-}
-SORT_LABELS = {"latest": "최신순", "name": "이름순"}
-SORT_KEYS_BY_LABEL = {label: key for key, label in SORT_LABELS.items()}
-COOKIE_DISPLAY_TO_SOURCE = dict(zip(COOKIE_DISPLAY_CHOICES, COOKIE_CHOICES))
-COOKIE_SOURCE_TO_DISPLAY = dict(zip(COOKIE_CHOICES, COOKIE_DISPLAY_CHOICES))
-DOWNLOAD_CONCURRENCY = 3
-ANALYZING_STATUS = "\ubd84\uc11d \uc911"
-READY_STATUS = "\uc900\ube44"
-WAITING_STATUS = "\ub300\uae30"
-DOWNLOAD_STATUS = "\ub2e4\uc6b4\ub85c\ub4dc \uc911"
-COMPLETED_STATUS = "\uc644\ub8cc"
-ERROR_STATUS = "\uc624\ub958"
-AUTO_LABEL = "\uc790\ub3d9"
+try:
+    from tools.clipflow_constants import *  # noqa: F401,F403
+    from tools import clipflow_constants as _const
+except ImportError:
+    from clipflow_constants import *  # noqa: F401,F403
+    import clipflow_constants as _const
 
 
 def default_save_folder():
@@ -107,170 +86,6 @@ def cookie_source_from_display(display_text):
     if text.startswith("쿠키:"):
         text = text.split(":", 1)[1].strip()
     return text or "없음"
-
-
-def _combo_text(combo):
-    return str(combo.currentText()).strip()
-
-
-class AnalyzeWorker(QObject):
-    event = Signal(dict)
-    finished = Signal(dict)
-    failed = Signal(str)
-
-    def __init__(self, url, cookie_source, output_ext, analyze_func):
-        super().__init__()
-        self.url = url
-        self.cookie_source = cookie_source
-        self.output_ext = output_ext
-        self.analyze_func = analyze_func
-
-    @Slot()
-    def run(self):
-        try:
-            analysis = self.analyze_func(
-                self.url,
-                cookie_source=self.cookie_source,
-                output_ext=self.output_ext,
-                on_event=self.event.emit,
-            )
-            self.finished.emit(analysis)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-
-
-class DownloadWorker(QObject):
-    event = Signal(str, dict)
-    finished = Signal(str, dict)
-    failed = Signal(str, str)
-
-    def __init__(self, row_id, page_url, candidate, output_dir, cookie_source, download_func):
-        super().__init__()
-        self.row_id = row_id
-        self.page_url = page_url
-        self.candidate = candidate
-        self.output_dir = output_dir
-        self.cookie_source = cookie_source
-        self.download_func = download_func
-
-    @Slot()
-    def run(self):
-        try:
-            def emit_event(event):
-                self.event.emit(self.row_id, event)
-
-            result = self.download_func(
-                self.page_url,
-                self.candidate,
-                self.output_dir,
-                cookie_source=self.cookie_source,
-                on_event=emit_event,
-            )
-            self.finished.emit(self.row_id, result)
-        except Exception as exc:
-            self.failed.emit(self.row_id, str(exc))
-
-
-class PreferencesDialog(QDialog):
-    def __init__(self, preferences, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("품질 설정")
-        self.setModal(True)
-        self.setMinimumWidth(360)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(12)
-
-        form = QGridLayout()
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(10)
-
-        self.quality_combo = CleanComboBox()
-        self.quality_combo.addItems(["자동", "2160p", "1440p", "1080p", "720p", "480p", "360p"])
-        self.format_combo = CleanComboBox()
-        self.format_combo.addItems(["자동", "MP4", "WEBM", "MP3", "WAV", "AAC"])
-        self.codec_combo = CleanComboBox()
-        self.codec_combo.addItems(["자동", "H264", "H265", "AV1", "VP9"])
-        self.frame_combo = CleanComboBox()
-        self.frame_combo.addItems(["자동", "60fps", "30fps"])
-
-        self.quality_combo.setCurrentText(preferences.quality)
-        self.format_combo.setCurrentText(preferences.output_format)
-        self.codec_combo.setCurrentText(preferences.codec)
-        self.frame_combo.setCurrentText(preferences.frame_rate)
-        self.format_combo.currentIndexChanged.connect(self.refresh_controls)
-
-        for row, (label, combo) in enumerate(
-            (
-                ("품질", self.quality_combo),
-                ("포맷", self.format_combo),
-                ("코덱", self.codec_combo),
-                ("프레임", self.frame_combo),
-            )
-        ):
-            label_widget = QLabel(label)
-            label_widget.setObjectName("MetaText")
-            form.addWidget(label_widget, row, 0)
-            form.addWidget(combo, row, 1)
-
-        layout.addLayout(form)
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        self.cancel_button = QPushButton("취소")
-        self.cancel_button.setObjectName("SecondaryButton")
-        self.ok_button = QPushButton("확인")
-        self.cancel_button.clicked.connect(self.reject)
-        self.ok_button.clicked.connect(self.accept)
-        buttons.addWidget(self.cancel_button)
-        buttons.addWidget(self.ok_button)
-        layout.addLayout(buttons)
-        self.refresh_controls()
-
-    def refresh_controls(self):
-        audio_format = self.format_combo.currentText().strip().lower() in presenter.AUDIO_FORMATS
-        self.codec_combo.setEnabled(not audio_format)
-        self.frame_combo.setEnabled(not audio_format)
-
-    def preferences(self):
-        return presenter.DownloadPreferences(
-            quality=_combo_text(self.quality_combo),
-            output_format=_combo_text(self.format_combo),
-            codec=_combo_text(self.codec_combo),
-            frame_rate=_combo_text(self.frame_combo),
-        )
-
-
-class DeleteConfirmDialog(QDialog):
-    def __init__(self, output_path, parent=None, title_text=None, detail_text=None, window_title=None):
-        super().__init__(parent)
-        self.setWindowTitle(window_title or "파일 삭제")
-        self.setModal(True)
-        self.setMinimumWidth(420)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(12)
-
-        title = QLabel(title_text or "파일을 삭제하시겠습니까?")
-        title.setObjectName("SectionTitle")
-        detail = QLabel(detail_text if detail_text is not None else str(output_path))
-        detail.setObjectName("MetaText")
-        detail.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(detail)
-
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        self.cancel_button = QPushButton("No")
-        self.cancel_button.setObjectName("SecondaryButton")
-        self.ok_button = QPushButton("Yes")
-        self.cancel_button.clicked.connect(self.reject)
-        self.ok_button.clicked.connect(self.accept)
-        buttons.addWidget(self.cancel_button)
-        buttons.addWidget(self.ok_button)
-        layout.addLayout(buttons)
 
 
 class ClipFlowWindow(QMainWindow):
