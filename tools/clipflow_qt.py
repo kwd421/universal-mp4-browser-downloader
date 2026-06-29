@@ -140,12 +140,13 @@ class AnalyzeWorker(QObject):
 
 
 class DownloadWorker(QObject):
-    event = Signal(dict)
-    finished = Signal(dict)
-    failed = Signal(str)
+    event = Signal(str, dict)
+    finished = Signal(str, dict)
+    failed = Signal(str, str)
 
-    def __init__(self, page_url, candidate, output_dir, cookie_source, download_func):
+    def __init__(self, row_id, page_url, candidate, output_dir, cookie_source, download_func):
         super().__init__()
+        self.row_id = row_id
         self.page_url = page_url
         self.candidate = candidate
         self.output_dir = output_dir
@@ -155,16 +156,19 @@ class DownloadWorker(QObject):
     @Slot()
     def run(self):
         try:
+            def emit_event(event):
+                self.event.emit(self.row_id, event)
+
             result = self.download_func(
                 self.page_url,
                 self.candidate,
                 self.output_dir,
                 cookie_source=self.cookie_source,
-                on_event=self.event.emit,
+                on_event=emit_event,
             )
-            self.finished.emit(result)
+            self.finished.emit(self.row_id, result)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(self.row_id, str(exc))
 
 
 class PreferencesDialog(QDialog):
@@ -1938,20 +1942,32 @@ class ClipFlowWindow(QMainWindow):
         self._set_status(DOWNLOAD_STATUS if started else "다운로드할 새 항목이 없습니다")
 
     def _refresh_playlist_parent_status(self, parent):
-        children = self._playlist_children_for_parent(parent)
+        children = [
+            row
+            for row in self._playlist_children_for_parent(parent)
+            if not row.get("child_loading")
+        ]
+        candidate = parent.get("candidate") or {}
+        expected = engine.safe_int(candidate.get("playlist_count") or candidate.get("item_count"))
+        total = max(len(children), expected) if parent.get("analysis_loading") else len(children)
         if not children:
             self._refresh_playlist_parent_metadata(parent)
+            if total:
+                parent["status"] = ANALYZING_STATUS
+                parent["status_detail"] = f"0/{total}"
+                parent["progress"] = 0
+                parent["progress_text"] = ""
             widget = parent.get("widget")
             if widget:
                 widget.refresh()
             return
         self._refresh_playlist_parent_metadata(parent)
-        total = len(children)
         completed = sum(1 for row in children if row.get("status") == COMPLETED_STATUS)
         active = sum(1 for row in children if row.get("status") in {DOWNLOAD_STATUS, WAITING_STATUS})
         failed = sum(1 for row in children if row.get("status") == ERROR_STATUS)
+        total = max(1, total)
         progress = int(sum(engine.safe_int(row.get("progress")) for row in children) / total)
-        if completed == total:
+        if completed == total and len(children) >= total:
             status = COMPLETED_STATUS
             detail = ""
             progress = 100
@@ -1994,6 +2010,7 @@ class ClipFlowWindow(QMainWindow):
         page_url = row.get("source_url") or (self.analysis or {}).get("webpage_url") or self.url_input.text().strip()
         thread = QThread(self)
         worker = DownloadWorker(
+            str(row.get("id") or ""),
             page_url,
             candidate,
             self._output_dir_for_row(row, candidate),
@@ -2006,13 +2023,13 @@ class ClipFlowWindow(QMainWindow):
         self._refresh_footer()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.event.connect(lambda event, download_row=row: self._handle_engine_event_for(download_row, event))
-        worker.finished.connect(lambda result, download_row=row: self._download_finished_for(download_row, result))
-        worker.failed.connect(lambda message, download_row=row: self._download_failed_for(download_row, message))
+        worker.event.connect(self._handle_download_worker_event)
+        worker.finished.connect(self._download_worker_finished)
+        worker.failed.connect(self._download_worker_failed)
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(lambda download_row=row, download_thread=thread: self._download_thread_finished_for(download_row, download_thread))
+        thread.finished.connect(self._download_thread_finished)
         thread.start()
 
     def _row_is_downloading(self, row):
@@ -2101,6 +2118,18 @@ class ClipFlowWindow(QMainWindow):
         self._refresh_footer()
         self._refresh_parent_for_child(row)
 
+    @Slot(str, dict)
+    def _handle_download_worker_event(self, row_id, event):
+        self._handle_engine_event_for(self._find_row_by_id(row_id), event)
+
+    @Slot(str, dict)
+    def _download_worker_finished(self, row_id, result):
+        self._download_finished_for(self._find_row_by_id(row_id), result)
+
+    @Slot(str, str)
+    def _download_worker_failed(self, row_id, message):
+        self._download_failed_for(self._find_row_by_id(row_id), message)
+
     @Slot(dict)
     def _download_finished(self, result):
         self._download_finished_for(self.active_download_row, result)
@@ -2179,7 +2208,11 @@ class ClipFlowWindow(QMainWindow):
     @Slot()
     def _download_thread_finished(self):
         thread = self.sender()
-        self._download_thread_finished_for(None, thread)
+        row = next(
+            (item.get("row") for item in self.active_downloads if item.get("thread") is thread),
+            None,
+        )
+        self._download_thread_finished_for(row, thread)
 
     def _download_thread_finished_for(self, row, thread):
         self.active_downloads = [

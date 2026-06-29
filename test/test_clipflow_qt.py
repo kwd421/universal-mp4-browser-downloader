@@ -2913,6 +2913,67 @@ print(parent["progress_text"])
             ["오류", "1/2", "50", "1/2"],
         )
 
+    def test_clipflow_qt_playlist_parent_progress_uses_known_count_during_progressive_analysis(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS, WAITING_STATUS
+
+url = "https://media.test/playlist/progressive"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window._handle_analysis_event({"type": "playlist_parent", "title": "Progressive Mix", "count": 8, "source_url": url})
+parent = window.rows[0]
+parent["analysis_loading"] = True
+
+for index in range(1, 6):
+    completed = index <= 3
+    window.rows.append({
+        "id": f"{parent['id']}-child-{index}",
+        "kind": "video",
+        "candidate": {
+            "id": str(index),
+            "source": f"https://media.test/watch/{index}",
+            "url": f"https://media.test/watch/{index}",
+            "title": f"Video {index}",
+            "display_title": f"Video {index}",
+            "thumbnail": "",
+            "ext": "mp4",
+            "output_ext": "mp4",
+            "duration": 60,
+            "sort_bytes": 10,
+        },
+        "qualities": [],
+        "quality_options": [],
+        "selected_index": 0,
+        "selected_format_index": 0,
+        "analysis_source_url": f"https://media.test/watch/{index}",
+        "source_url": f"https://media.test/watch/{index}",
+        "input_url": f"https://media.test/watch/{index}",
+        "status": COMPLETED_STATUS if completed else WAITING_STATUS,
+        "status_detail": "",
+        "progress": 100 if completed else 0,
+        "progress_text": "",
+        "output_path": "",
+        "messages": [],
+        "created_order": index,
+        "parent_playlist_id": parent["id"],
+        "is_playlist_child": True,
+        "playlist_child_index": index,
+        "playlist_key": parent.get("playlist_key"),
+    })
+
+window._refresh_playlist_parent_status(parent)
+print(parent["candidate"]["item_count"])
+print(parent["status_detail"])
+print(parent["progress"])
+print(parent["progress_text"])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["8", "3/8", "37", "37%"])
+
     def test_clipflow_qt_download_thread_finish_refreshes_all_playlist_parents(self):
         script = r'''
 from PySide6.QtWidgets import QApplication
@@ -2955,6 +3016,64 @@ print(parent["widget"].progress_text.text())
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["완료", "100", "", ""])
+
+    def test_clipflow_qt_download_worker_callbacks_run_on_ui_thread(self):
+        script = r'''
+import time
+from PySide6.QtCore import QThread
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, on_event=None):
+    if on_event:
+        on_event({"type": "progress", "percent": 12, "message": "12%"})
+    return {"output_dir": str(output_dir)}
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.download_func = fake_download
+row = {
+    "id": "row-1",
+    "kind": "video",
+    "candidate": {"id": "row-1", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4"},
+    "qualities": [{"id": "row-1", "source": "https://media.test/watch/1", "url": "https://media.test/watch/1", "title": "One", "display_title": "One", "thumbnail": "", "ext": "mp4", "output_ext": "mp4"}],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "analysis_source_url": "https://media.test/watch/1",
+    "source_url": "https://media.test/watch/1",
+    "input_url": "https://media.test/watch/1",
+    "status": "",
+    "status_detail": "",
+    "progress": 0,
+    "progress_text": "",
+    "output_path": "",
+    "messages": [],
+    "created_order": 1,
+}
+window.rows = [row]
+callback_threads = []
+
+def capture_event(download_row, event):
+    callback_threads.append(QThread.currentThread() is app.thread())
+
+def capture_finished(download_row, result):
+    callback_threads.append(QThread.currentThread() is app.thread())
+
+window._handle_engine_event_for = capture_event
+window._download_finished_for = capture_finished
+window.start_download_for_row(row)
+deadline = time.time() + 5
+while window.active_downloads and time.time() < deadline:
+    app.processEvents()
+    time.sleep(0.01)
+app.processEvents()
+print(callback_threads)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "[True, True]")
 
     def test_clipflow_qt_completed_history_saves_playlist_parent_with_completed_children(self):
         script = r'''
