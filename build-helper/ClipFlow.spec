@@ -7,6 +7,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 ROOT = Path(SPECPATH).resolve().parent
 ENTRYPOINT = ROOT / "tools" / "clipflow_entry.py"
+ICON = ROOT / "build-helper" / "ClipFlow.icns"
 
 datas = [
     (str(ROOT / "assets" / "icons" / "lucide"), "assets/icons/lucide"),
@@ -58,11 +59,13 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(ICON),
 )
 
 if sys.platform == "darwin":
     app = BUNDLE(
         exe,
         name="ClipFlow.app",
+        icon=str(ICON),
         bundle_identifier="com.clipflow.app",
     )
