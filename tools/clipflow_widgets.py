@@ -573,6 +573,8 @@ class ThumbnailPlaceholder(QFrame):
         self.icon = LucideIconWidget("play", size=22, color=theme.MUTED, parent=self)
         self.thumbnail_url = ""
         self._pixmap = QPixmap()
+        self._scaled_pixmap = QPixmap()
+        self._scaled_target_size = QSize()
         self._reply = None
         self._preview = None
         self._preview_label = None
@@ -589,6 +591,8 @@ class ThumbnailPlaceholder(QFrame):
             return
         self.thumbnail_url = url
         self._pixmap = QPixmap()
+        self._scaled_pixmap = QPixmap()
+        self._scaled_target_size = QSize()
         self.icon.show()
         if self._reply:
             self._reply.abort()
@@ -623,6 +627,8 @@ class ThumbnailPlaceholder(QFrame):
             reply.deleteLater()
 
     def _set_pixmap(self, pixmap):
+        self._scaled_pixmap = QPixmap()
+        self._scaled_target_size = QSize()
         if pixmap.isNull():
             self.icon.show()
             self.update()
@@ -635,6 +641,13 @@ class ThumbnailPlaceholder(QFrame):
         self.icon.move((self.width() - self.icon.width()) // 2, (self.height() - self.icon.height()) // 2)
         super().resizeEvent(event)
 
+    def _scaled_thumbnail_pixmap(self):
+        target_size = self.size()
+        if self._scaled_pixmap.isNull() or self._scaled_target_size != target_size:
+            self._scaled_pixmap = self._pixmap.scaled(target_size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            self._scaled_target_size = QSize(target_size.width(), target_size.height())
+        return self._scaled_pixmap
+
     def paintEvent(self, event):
         super().paintEvent(event)
         if self._pixmap.isNull():
@@ -645,7 +658,7 @@ class ThumbnailPlaceholder(QFrame):
         path = QPainterPath()
         path.addRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 7, 7)
         painter.setClipPath(path)
-        scaled = self._pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        scaled = self._scaled_thumbnail_pixmap()
         x = (self.width() - scaled.width()) // 2
         y = (self.height() - scaled.height()) // 2
         painter.drawPixmap(x, y, scaled)

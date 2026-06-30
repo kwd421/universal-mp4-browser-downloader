@@ -414,15 +414,27 @@ def display_title_for(video_info, root_info):
 def thumbnail_from_info(info):
     if not isinstance(info, dict):
         return ""
-    if info.get("thumbnail"):
-        return str(info["thumbnail"])
     thumbnails = info.get("thumbnails") or []
-    if not thumbnails:
-        return ""
     usable = [item for item in thumbnails if isinstance(item, dict) and item.get("url")]
+    if info.get("thumbnail"):
+        usable.append({"url": info["thumbnail"], "width": info.get("width"), "height": info.get("height")})
     if not usable:
         return ""
-    best = sorted(usable, key=lambda item: safe_int(item.get("width")) * safe_int(item.get("height")), reverse=True)[0]
+
+    def score(item):
+        url = str(item.get("url") or "")
+        area = safe_int(item.get("width")) * safe_int(item.get("height"))
+        stable_youtube = 0
+        if "i.ytimg.com/" in url:
+            if "/vi/" in url:
+                stable_youtube = 3
+            elif "/vi_webp/" in url:
+                stable_youtube = 2
+            elif "/vi_lc/" in url:
+                stable_youtube = 0
+        return stable_youtube, area
+
+    best = sorted(usable, key=score, reverse=True)[0]
     return str(best.get("url") or "")
 
 
