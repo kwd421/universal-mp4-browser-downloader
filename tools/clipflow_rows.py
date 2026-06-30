@@ -1,4 +1,5 @@
 # Auto-split from clipflow_qt.py; keep behavior changes in focused commits.
+import math
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt
@@ -554,12 +555,38 @@ class DownloadRowWidget(QFrame):
         cached = self._progress_partial_paths.get(progress)
         if cached is not None:
             return cached
-        fraction = progress / 100.0
-        samples = 72
         partial = QPainterPath()
-        partial.moveTo(full.pointAtPercent(0.0))
-        for index in range(1, samples + 1):
-            partial.lineTo(full.pointAtPercent(fraction * index / samples))
+        polygons = full.toSubpathPolygons()
+        points = list(polygons[0]) if polygons else []
+        if len(points) < 2:
+            self._progress_partial_paths[progress] = partial
+            return partial
+        lengths = []
+        total_length = 0.0
+        for start, end in zip(points, points[1:]):
+            segment_length = math.hypot(end.x() - start.x(), end.y() - start.y())
+            lengths.append(segment_length)
+            total_length += segment_length
+        if total_length <= 0:
+            self._progress_partial_paths[progress] = partial
+            return partial
+        target_length = total_length * progress / 100.0
+        traversed = 0.0
+        partial.moveTo(points[0])
+        for index, segment_length in enumerate(lengths):
+            start = points[index]
+            end = points[index + 1]
+            if traversed + segment_length <= target_length:
+                partial.lineTo(end)
+                traversed += segment_length
+                continue
+            if segment_length > 0:
+                ratio = max(0.0, min(1.0, (target_length - traversed) / segment_length))
+                partial.lineTo(
+                    start.x() + (end.x() - start.x()) * ratio,
+                    start.y() + (end.y() - start.y()) * ratio,
+                )
+            break
         self._progress_partial_paths[progress] = partial
         return partial
 
