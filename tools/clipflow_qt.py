@@ -723,8 +723,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         detail = QLabel(
             "비공개·로그인 전용 영상이나 재생목록은 브라우저의 로그인 쿠키가 필요해요.\n"
             "macOS에서는 ClipFlow가 브라우저 쿠키를 읽으려면 ‘전체 디스크 접근’ 권한이 있어야 합니다.\n\n"
-            "‘전체 디스크 접근 열기’를 누른 뒤 목록에서 이 앱(터미널에서 실행했다면 터미널)을 켜고, "
-            "다시 다운로드를 시도하세요."
+            "‘전체 디스크 접근 열기’를 누르면 이 앱(터미널에서 실행했다면 ‘터미널’)이 목록에 자동으로 추가돼요. "
+            "옆의 스위치만 켜고 다시 다운로드를 시도하세요."
         )
         detail.setObjectName("MetaText")
         detail.setWordWrap(True)
@@ -745,7 +745,29 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         dialog.exec()
 
     def _open_full_disk_access_settings(self):
+        # Touch Full-Disk-Access-protected paths first so macOS registers the
+        # responsible app (this app, or the launching Terminal) in the Full Disk
+        # Access list automatically — the user then only flips the switch.
+        self._provoke_full_disk_access_registration()
         QDesktopServices.openUrl(QUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"))
+
+    def _provoke_full_disk_access_registration(self):
+        if sys.platform != "darwin":
+            return
+        home = os.path.expanduser("~")
+        protected_paths = [
+            os.path.join(home, "Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies"),
+            os.path.join(home, "Library/Cookies/Cookies.binarycookies"),
+            os.path.join(home, "Library/Safari/Bookmarks.plist"),
+        ]
+        for path in protected_paths:
+            try:
+                with open(path, "rb") as handle:
+                    handle.read(1)
+            except Exception:
+                # A PermissionError here is exactly what makes macOS list this
+                # app under Full Disk Access; other errors are harmless to ignore.
+                continue
 
     @Slot()
     def _analysis_thread_finished(self):
