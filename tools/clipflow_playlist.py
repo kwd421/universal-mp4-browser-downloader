@@ -429,8 +429,9 @@ class PlaylistMixin:
 
     def _video_row_from_grouped(self, grouped_row, analysis, source_url):
         candidate = grouped_row["candidate"]
+        created_order = self._next_row_sequence()
         return {
-            "id": grouped_row.get("id"),
+            "id": f"video-{created_order}",
             "kind": row_kind(candidate),
             "candidate": candidate,
             "qualities": grouped_row["qualities"],
@@ -446,7 +447,7 @@ class PlaylistMixin:
             "progress_text": "",
             "output_path": "",
             "messages": [],
-            "created_order": self._next_row_sequence(),
+            "created_order": created_order,
         }
 
     def _playlist_candidate_from_analysis(self, analysis, grouped_rows, source_url):

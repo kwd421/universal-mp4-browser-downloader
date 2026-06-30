@@ -91,8 +91,39 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
                 manager = TooltipManager(app)
                 app.installEventFilter(manager)
                 app._clipflow_tooltip_manager = manager
-        self.analyze_func = analyze_func
-        self.download_func = download_func
+        self._default_ydl_factory = None
+        if analyze_func is engine.analyze_url:
+            self._default_ydl_factory = engine.youtube_dl_factory()
+            engine.ffmpeg_path()
+            engine.yt_dlp_windows_version()
+        if analyze_func is engine.analyze_url:
+            def analyze_with_default_factory(url, cookie_source=None, output_ext=None, on_event=None, proxy_url=None):
+                return engine.analyze_url(
+                    url,
+                    cookie_source=cookie_source,
+                    ydl_factory=self._default_ydl_factory,
+                    on_event=on_event,
+                    proxy_url=proxy_url,
+                    output_ext=output_ext,
+                )
+
+            self.analyze_func = analyze_with_default_factory
+        else:
+            self.analyze_func = analyze_func
+        if download_func is engine.download_candidate:
+            def download_with_subprocess_boundary(page_url, candidate, output_dir, cookie_source=None, on_event=None, proxy_url=None):
+                return engine.download_candidate_in_subprocess(
+                    page_url,
+                    candidate,
+                    output_dir,
+                    cookie_source=cookie_source,
+                    on_event=on_event,
+                    proxy_url=proxy_url,
+                )
+
+            self.download_func = download_with_subprocess_boundary
+        else:
+            self.download_func = download_func
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
         self.preference_values = self._initial_preferences()
         self.sort_key = self.settings.value(SORT_KEY_SETTING, "latest", str) or "latest"
@@ -790,6 +821,13 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--clipflow-download-worker":
+        try:
+            from tools.clipflow_download_process import main as download_worker_main
+        except ImportError:
+            from clipflow_download_process import main as download_worker_main
+        return download_worker_main(sys.argv[1:])
+
     app = QApplication(sys.argv)
     configure_app_font(app)
     window = ClipFlowWindow()

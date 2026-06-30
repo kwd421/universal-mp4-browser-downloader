@@ -4,6 +4,7 @@ import re
 import html as html_lib
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -41,6 +42,27 @@ COOKIE_SOURCES = {
     "whale": ("whale",),
     "chromium": ("chromium",),
 }
+_YOUTUBE_DL_FACTORY = None
+_FFMPEG_PATH_UNSET = object()
+_FFMPEG_PATH = _FFMPEG_PATH_UNSET
+
+
+def youtube_dl_factory():
+    global _YOUTUBE_DL_FACTORY
+    if _YOUTUBE_DL_FACTORY is None:
+        from yt_dlp import YoutubeDL
+
+        _YOUTUBE_DL_FACTORY = YoutubeDL
+    return _YOUTUBE_DL_FACTORY
+
+
+def yt_dlp_windows_version():
+    try:
+        from yt_dlp.utils import _utils
+
+        return _utils.get_windows_version()
+    except Exception:
+        return ()
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -78,12 +100,16 @@ class EventLogger:
 
 
 def ffmpeg_path():
+    global _FFMPEG_PATH
+    if _FFMPEG_PATH is not _FFMPEG_PATH_UNSET:
+        return _FFMPEG_PATH
     try:
         import imageio_ffmpeg
 
-        return imageio_ffmpeg.get_ffmpeg_exe()
+        _FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
-        return None
+        _FFMPEG_PATH = None
+    return _FFMPEG_PATH
 
 
 def safe_int(value, default=0):
@@ -1549,9 +1575,7 @@ def analyze_url(
         return chzzk
 
     if ydl_factory is None:
-        from yt_dlp import YoutubeDL
-
-        ydl_factory = YoutubeDL
+        ydl_factory = youtube_dl_factory()
 
     allow_playlist = looks_like_playlist_url(url) and not _force_single
 
@@ -1664,9 +1688,7 @@ def analyze_url(
 
 def download_candidate(page_url, candidate, output_dir, cookie_source="없음", ydl_factory=None, on_event=None, proxy_url=None):
     if ydl_factory is None:
-        from yt_dlp import YoutubeDL
-
-        ydl_factory = YoutubeDL
+        ydl_factory = youtube_dl_factory()
 
     existing_output_path = existing_output_path_for_candidate(candidate, output_dir)
     if existing_output_path:
@@ -1721,6 +1743,153 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
                 ydl.download([target_url])
     emit_event(on_event, "done", path=str(output_dir))
     return {"ok": True, "output_dir": str(output_dir), "target_url": target_url}
+
+
+def download_worker_command(request_path):
+    request_path = str(request_path)
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--clipflow-download-worker", request_path]
+    return [sys.executable, "-u", "-m", "tools.clipflow_download_process", request_path]
+
+
+def download_candidate_in_subprocess(
+    page_url,
+    candidate,
+    output_dir,
+    cookie_source="없음",
+    on_event=None,
+    proxy_url=None,
+    process_command=None,
+):
+    temp_root = Path(tempfile.mkdtemp(prefix="clipflow-download-"))
+    request_path = temp_root / "request.json"
+    event_path = temp_root / "events.jsonl"
+    stderr_path = temp_root / "stderr.log"
+    result = None
+    failed_message = ""
+    side_output = []
+
+    def handle_payload(payload):
+        nonlocal result, failed_message
+        if not isinstance(payload, dict):
+            return
+        payload_type = payload.get("type")
+        if payload_type == "event":
+            event = payload.get("event")
+            if isinstance(event, dict) and on_event:
+                on_event(event)
+        elif payload_type == "finished":
+            result_value = payload.get("result")
+            result = result_value if isinstance(result_value, dict) else {}
+        elif payload_type == "failed":
+            failed_message = strip_ansi(payload.get("message") or "Download worker failed.")
+
+    def handle_line(line):
+        text = str(line or "").strip()
+        if not text:
+            return
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            side_output.append(strip_ansi(text))
+            return
+        handle_payload(payload)
+
+    request = {
+        "page_url": page_url,
+        "candidate": candidate or {},
+        "output_dir": str(output_dir),
+        "cookie_source": cookie_source,
+        "proxy_url": proxy_url,
+    }
+    use_event_file = process_command is None
+    if use_event_file:
+        request["event_path"] = str(event_path)
+    request_path.write_text(json.dumps(request, ensure_ascii=False, default=str), encoding="utf-8")
+
+    command = process_command or download_worker_command(request_path)
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    cwd = str(Path(__file__).resolve().parents[1])
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+
+    try:
+        if use_event_file:
+            with stderr_path.open("w", encoding="utf-8", errors="replace") as stderr_file:
+                process = subprocess.Popen(
+                    command,
+                    cwd=cwd,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                    text=True,
+                    creationflags=creationflags,
+                )
+                consumed_length = 0
+                pending_line = ""
+                def consume_event_file(final=False):
+                    nonlocal consumed_length, pending_line
+                    if not event_path.exists():
+                        return
+                    text = event_path.read_text(encoding="utf-8", errors="replace")
+                    if len(text) < consumed_length:
+                        consumed_length = 0
+                        pending_line = ""
+                    new_text = text[consumed_length:]
+                    consumed_length = len(text)
+                    if new_text:
+                        pending_line += new_text
+                    while True:
+                        newline_index = pending_line.find("\n")
+                        if newline_index < 0:
+                            break
+                        line = pending_line[:newline_index].removesuffix("\r")
+                        pending_line = pending_line[newline_index + 1:]
+                        handle_line(line)
+                    if final and pending_line.strip():
+                        handle_line(pending_line)
+                        pending_line = ""
+
+                while process.poll() is None:
+                    consume_event_file()
+                    time.sleep(0.05)
+                consume_event_file(final=True)
+                return_code = process.wait()
+            if stderr_path.exists():
+                stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+                if stderr_text.strip():
+                    side_output.extend(strip_ansi(line) for line in stderr_text.splitlines() if line.strip())
+        else:
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creationflags,
+            )
+            if process.stdout:
+                try:
+                    for line in process.stdout:
+                        handle_line(line)
+                finally:
+                    process.stdout.close()
+            return_code = process.wait()
+
+        if failed_message or return_code:
+            detail = failed_message or "\n".join(side_output[-20:]) or f"Download worker exited with code {return_code}."
+            raise RuntimeError(strip_ansi(detail))
+        if result is None:
+            detail = "\n".join(side_output[-20:]) or "Download worker did not return a result."
+            raise RuntimeError(strip_ansi(detail))
+        return result
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
 
 
 def should_retry_progressive_mp4(candidate, exc, allow_progressive=False):

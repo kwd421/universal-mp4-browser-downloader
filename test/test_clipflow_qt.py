@@ -2104,6 +2104,67 @@ app.exec()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["3", "1"])
 
+    def test_clipflow_qt_concurrent_downloads_keep_progress_on_distinct_repeated_analysis_rows(self):
+        script = r'''
+import time
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS
+
+urls = ["https://media.test/watch/one", "https://media.test/watch/two"]
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    title = candidate.get("display_title")
+    time.sleep(0.15 if title == "One" else 0.25)
+    if on_event:
+        on_event({"type": "progress", "percent": 41 if title == "One" else 82, "message": f"{title} progress"})
+    time.sleep(0.05)
+    return {"ok": True, "output_dir": str(output_dir)}
+
+def analyze(window, url, title):
+    window.url_input.setText(url)
+    window._analysis_finished({
+        "webpage_url": url,
+        "url": url,
+        "title": title,
+        "candidates": [{"id": title.lower(), "source": url, "url": url, "title": title, "display_title": title, "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": 1}],
+        "warnings": [],
+    })
+    return next(row for row in window.rows if (row.get("candidate") or {}).get("display_title") == title)
+
+app = QApplication([])
+window = ClipFlowWindow(download_func=fake_download)
+first = analyze(window, urls[0], "One")
+window.start_download_for_row(first)
+second = analyze(window, urls[1], "Two")
+window.start_download_for_row(second)
+
+def done():
+    if not window.active_downloads and not window.queued_download_rows:
+        app.quit()
+
+timer = QTimer()
+timer.timeout.connect(done)
+timer.start(50)
+QTimer.singleShot(3000, app.quit)
+app.exec()
+
+rows_by_title = {
+    (row.get("candidate") or {}).get("display_title"): row
+    for row in window.rows
+    if (row.get("candidate") or {}).get("display_title") in {"One", "Two"}
+}
+print(rows_by_title["One"]["id"] != rows_by_title["Two"]["id"])
+print(rows_by_title["One"]["status"] == COMPLETED_STATUS)
+print(rows_by_title["Two"]["status"] == COMPLETED_STATUS)
+print(rows_by_title["One"]["progress"])
+print(rows_by_title["Two"]["progress"])
+'''
+        result = run_qt_script(script, timeout=8)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "100", "100"])
+
     def test_clipflow_qt_repeated_click_on_same_row_does_not_duplicate_download(self):
         script = r'''
 import time
@@ -3074,6 +3135,99 @@ print(callback_threads)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "[True, True]")
+
+    def test_clipflow_qt_default_engine_preloads_ytdlp_factory_on_ui_thread(self):
+        script = r'''
+from PySide6.QtCore import QThread
+from PySide6.QtWidgets import QApplication
+from tools import clipflow_qt
+
+app = QApplication([])
+factory = object()
+calls = []
+ffmpeg_calls = []
+windows_version_calls = []
+original_factory = clipflow_qt.engine.youtube_dl_factory
+original_ffmpeg = clipflow_qt.engine.ffmpeg_path
+original_windows_version = clipflow_qt.engine.yt_dlp_windows_version
+
+def fake_factory():
+    calls.append(QThread.currentThread() is app.thread())
+    return factory
+
+def fake_ffmpeg():
+    ffmpeg_calls.append(QThread.currentThread() is app.thread())
+    return None
+
+def fake_windows_version():
+    windows_version_calls.append(QThread.currentThread() is app.thread())
+    return (10, 0)
+
+clipflow_qt.engine.youtube_dl_factory = fake_factory
+clipflow_qt.engine.ffmpeg_path = fake_ffmpeg
+clipflow_qt.engine.yt_dlp_windows_version = fake_windows_version
+try:
+    window = clipflow_qt.ClipFlowWindow()
+finally:
+    clipflow_qt.engine.youtube_dl_factory = original_factory
+    clipflow_qt.engine.ffmpeg_path = original_ffmpeg
+    clipflow_qt.engine.yt_dlp_windows_version = original_windows_version
+
+print(calls)
+print(ffmpeg_calls)
+print(windows_version_calls)
+print(window._default_ydl_factory is factory)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["[True]", "[True]", "[True]", "True"])
+
+    def test_clipflow_qt_default_download_uses_subprocess_boundary(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools import clipflow_qt
+
+app = QApplication([])
+calls = []
+events = []
+original = clipflow_qt.engine.download_candidate_in_subprocess
+
+def fake_process(page_url, candidate, output_dir, cookie_source=None, on_event=None, proxy_url=None):
+    calls.append([page_url, candidate.get("format_selector"), str(output_dir), cookie_source, proxy_url])
+    if on_event:
+        on_event({"type": "progress", "percent": 12, "message": "12%"})
+    return {"ok": True, "output_dir": str(output_dir), "target_url": page_url}
+
+clipflow_qt.engine.download_candidate_in_subprocess = fake_process
+try:
+    window = clipflow_qt.ClipFlowWindow()
+    result = window.download_func(
+        "https://media.test/watch",
+        {"format_selector": "best", "output_ext": "mp4"},
+        "C:/Out",
+        cookie_source="Firefox",
+        proxy_url="http://127.0.0.1:8080",
+        on_event=events.append,
+    )
+finally:
+    clipflow_qt.engine.download_candidate_in_subprocess = original
+
+print(calls)
+print(events)
+print(result["target_url"])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "[['https://media.test/watch', 'best', 'C:/Out', 'Firefox', 'http://127.0.0.1:8080']]",
+                "[{'type': 'progress', 'percent': 12, 'message': '12%'}]",
+                "https://media.test/watch",
+            ],
+        )
 
     def test_clipflow_qt_completed_history_saves_playlist_parent_with_completed_children(self):
         script = r'''

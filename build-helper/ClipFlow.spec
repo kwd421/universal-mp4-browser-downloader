@@ -15,7 +15,7 @@ binaries = []
 hiddenimports = []
 
 hiddenimports += collect_submodules("yt_dlp")
-hiddenimports += ["PySide6.QtSvg"]
+hiddenimports += ["PySide6.QtSvg", "tools.clipflow_download_process"]
 
 for package in ("imageio_ffmpeg", "yt_dlp_ejs", "PIL", "curl_cffi"):
     tmp_ret = collect_all(package)

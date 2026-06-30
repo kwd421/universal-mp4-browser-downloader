@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+import sys
 from pathlib import Path
 
 from tools import downloader_engine as engine
@@ -355,6 +356,55 @@ class DownloaderEngineTests(unittest.TestCase):
                 ("18/best[ext=mp4]/best", None),
             ],
         )
+
+    def test_download_candidate_in_subprocess_relays_events_and_result(self):
+        events = []
+        script = (
+            "import json, sys; "
+            "print(json.dumps({'type':'event','event':{'type':'progress','percent':25,'message':'25%'}}), flush=True); "
+            "print(json.dumps({'type':'finished','result':{'ok':True,'output_dir':'C:/Out','target_url':'https://media.test/watch'}}), flush=True)"
+        )
+
+        result = engine.download_candidate_in_subprocess(
+            "https://media.test/watch",
+            {"format_selector": "best", "output_ext": "mp4"},
+            "C:/Out",
+            on_event=events.append,
+            process_command=[sys.executable, "-u", "-c", script],
+        )
+
+        self.assertEqual(events, [{"type": "progress", "percent": 25, "message": "25%"}])
+        self.assertEqual(result["target_url"], "https://media.test/watch")
+
+    def test_download_candidate_in_subprocess_keeps_partial_event_file_line(self):
+        script = r'''
+import json
+import sys
+import time
+from pathlib import Path
+
+request = json.loads(Path(sys.argv[-1]).read_text(encoding="utf-8"))
+event_path = Path(request["event_path"])
+line = json.dumps({"type": "finished", "result": {"ok": True, "target_url": "partial-line"}}) + "\n"
+with event_path.open("a", encoding="utf-8") as file:
+    file.write(line[:20])
+    file.flush()
+    time.sleep(0.2)
+    file.write(line[20:])
+    file.flush()
+'''
+        original_command = engine.download_worker_command
+        engine.download_worker_command = lambda request_path: [sys.executable, "-u", "-c", script, str(request_path)]
+        try:
+            result = engine.download_candidate_in_subprocess(
+                "https://media.test/watch",
+                {"format_selector": "best", "output_ext": "mp4"},
+                "C:/Out",
+            )
+        finally:
+            engine.download_worker_command = original_command
+
+        self.assertEqual(result["target_url"], "partial-line")
 
     def test_download_options_convert_audio_candidates_to_wav(self):
         candidate = {"format_selector": "140", "output_ext": "wav"}
