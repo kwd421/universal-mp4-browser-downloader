@@ -44,9 +44,26 @@ def main():
         pixmap = icon.pixmap(size, size)
         pixmap.save(str(iconset / name), "PNG")
 
-    icns = out_dir / "ClipFlow.icns"
-    subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)], check=True)
-    print("wrote", icns)
+    # Windows .ico (cross-platform via Pillow) from the largest master PNG.
+    try:
+        from PIL import Image
+
+        master = Image.open(iconset / "icon_512x512@2x.png").convert("RGBA")
+        ico = out_dir / "ClipFlow.ico"
+        master.save(
+            str(ico),
+            format="ICO",
+            sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+        )
+        print("wrote", ico)
+    except Exception as exc:  # noqa: BLE001 - icon generation is best-effort
+        print("skip .ico:", exc)
+
+    # macOS .icns via iconutil (only available on macOS).
+    if sys.platform == "darwin":
+        icns = out_dir / "ClipFlow.icns"
+        subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)], check=True)
+        print("wrote", icns)
 
 
 if __name__ == "__main__":
