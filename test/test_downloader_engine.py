@@ -1,10 +1,15 @@
 import concurrent.futures
+import contextlib
+import io
+import json
+import time
 import unittest
 import tempfile
 import sys
 from pathlib import Path
 
 from tools import downloader_engine as engine
+from tools import clipflow_analysis_process
 
 
 SAMPLE_INFO = {
@@ -713,6 +718,156 @@ for line in sys.stdin:
         self.assertEqual(events["one"], [{"type": "progress", "label": "one", "percent": 50}])
         self.assertEqual(events["two"], [{"type": "progress", "label": "two", "percent": 50}])
         self.assertNotEqual(results[0]["pid"], results[1]["pid"])
+
+    def test_analysis_process_run_request_emits_events_before_finished_result(self):
+        def fake_analyze(url, cookie_source=None, output_ext=None, proxy_url=None, on_event=None):
+            on_event({"type": "status", "message": "URL 분석 중"})
+            return {
+                "webpage_url": url,
+                "cookie_source": cookie_source,
+                "output_ext": output_ext,
+                "proxy_url": proxy_url,
+                "candidates": [],
+                "warnings": [],
+            }
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            clipflow_analysis_process.run_request(
+                {
+                    "url": "https://media.test/watch",
+                    "cookie_source": "Firefox",
+                    "output_ext": "MP4",
+                    "proxy_url": "http://127.0.0.1:8080",
+                },
+                analyze_func=fake_analyze,
+            )
+
+        payloads = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(payloads[0], {"type": "event", "event": {"type": "status", "message": "URL 분석 중"}})
+        self.assertEqual(payloads[1]["type"], "finished")
+        self.assertEqual(payloads[1]["result"]["webpage_url"], "https://media.test/watch")
+        self.assertEqual(payloads[1]["result"]["cookie_source"], "Firefox")
+        self.assertEqual(payloads[1]["result"]["output_ext"], "MP4")
+        self.assertEqual(payloads[1]["result"]["proxy_url"], "http://127.0.0.1:8080")
+
+    def test_analysis_process_writes_payloads_as_utf8_bytes(self):
+        class FakeStdout:
+            def __init__(self):
+                self.buffer = io.BytesIO()
+
+        original_stdout = sys.stdout
+        fake_stdout = FakeStdout()
+        try:
+            sys.stdout = fake_stdout
+            clipflow_analysis_process._write_payload({"type": "event", "event": {"message": "한글 제목"}})
+        finally:
+            sys.stdout = original_stdout
+
+        payload = json.loads(fake_stdout.buffer.getvalue().decode("utf-8"))
+        self.assertEqual(payload["event"]["message"], "한글 제목")
+
+    def test_analysis_process_pool_reuses_persistent_worker_process(self):
+        script = r'''
+import json
+import os
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({"type": "event", "event": {"type": "status", "message": request["url"]}}), flush=True)
+    print(json.dumps({"type": "finished", "result": {"url": request["url"], "pid": os.getpid()}}), flush=True)
+'''
+        pool = engine.AnalysisProcessPool(
+            idle_seconds=60,
+            max_idle=1,
+            command_factory=lambda: [sys.executable, "-u", "-c", script],
+        )
+        events = []
+        try:
+            first = pool.run(engine._analysis_worker_request("https://media.test/one"), on_event=events.append)
+            second = pool.run(engine._analysis_worker_request("https://media.test/two"), on_event=events.append)
+        finally:
+            pool.close_all()
+
+        self.assertEqual(first["url"], "https://media.test/one")
+        self.assertEqual(second["url"], "https://media.test/two")
+        self.assertEqual(first["pid"], second["pid"])
+        self.assertEqual(
+            events,
+            [
+                {"type": "status", "message": "https://media.test/one"},
+                {"type": "status", "message": "https://media.test/two"},
+            ],
+        )
+
+    def test_analysis_process_reports_failed_payload_with_side_output_context(self):
+        script = r'''
+import json
+import sys
+
+for line in sys.stdin:
+    print("side diagnostic", flush=True)
+    print(json.dumps({"type": "failed", "message": "\u001b[31mbad analysis\u001b[0m"}), flush=True)
+'''
+        worker = engine.PersistentAnalysisProcess(command=[sys.executable, "-u", "-c", script])
+        try:
+            with self.assertRaises(RuntimeError) as raised:
+                worker.run(engine._analysis_worker_request("https://media.test/fail"))
+        finally:
+            worker.close()
+
+        self.assertEqual(str(raised.exception), "bad analysis")
+
+    def test_analysis_process_pool_trims_stale_idle_worker_with_timer(self):
+        script = r'''
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({"type": "finished", "result": {"url": request["url"]}}), flush=True)
+'''
+        pool = engine.AnalysisProcessPool(
+            idle_seconds=0.05,
+            max_idle=1,
+            command_factory=lambda: [sys.executable, "-u", "-c", script],
+        )
+        try:
+            result = pool.run(engine._analysis_worker_request("https://media.test/trim"))
+            self.assertEqual(result["url"], "https://media.test/trim")
+            self.assertEqual(len(pool._idle), 1)
+            time.sleep(0.25)
+            with pool._lock:
+                idle = list(pool._idle)
+            self.assertEqual(idle, [])
+        finally:
+            pool.close_all()
+
+    def test_download_process_pool_trims_stale_idle_worker_with_timer(self):
+        script = r'''
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({"type": "finished", "result": {"ok": True, "target_url": request["page_url"]}}), flush=True)
+'''
+        pool = engine.DownloadProcessPool(
+            idle_seconds=0.05,
+            max_idle=1,
+            command_factory=lambda: [sys.executable, "-u", "-c", script],
+        )
+        try:
+            result = pool.run(engine._download_worker_request("https://media.test/trim", {}, "C:/Out"))
+            self.assertEqual(result["target_url"], "https://media.test/trim")
+            self.assertEqual(len(pool._idle), 1)
+            time.sleep(0.25)
+            with pool._lock:
+                idle = list(pool._idle)
+            self.assertEqual(idle, [])
+        finally:
+            pool.close_all()
 
     def test_download_options_convert_audio_candidates_to_wav(self):
         candidate = {"format_selector": "140", "output_ext": "wav"}

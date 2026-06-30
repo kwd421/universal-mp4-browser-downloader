@@ -1,7 +1,7 @@
 """ClipFlow frozen-entry dispatcher.
 
-Keep the download-worker branch free of Qt imports so the frozen app can spawn
-lightweight worker processes from the same executable.
+Keep worker branches free of Qt imports so the frozen app can spawn lightweight
+worker processes from the same executable.
 """
 
 import sys
@@ -14,6 +14,12 @@ def main():
             from tools.clipflow_download_process import main as worker_main
         except ImportError:
             from clipflow_download_process import main as worker_main
+        return worker_main(argv)
+    if argv and argv[0] == "--clipflow-analysis-worker":
+        try:
+            from tools.clipflow_analysis_process import main as worker_main
+        except ImportError:
+            from clipflow_analysis_process import main as worker_main
         return worker_main(argv)
 
     try:

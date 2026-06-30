@@ -1889,8 +1889,11 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
 
 
 DOWNLOAD_WORKER_IDLE_SECONDS = 30.0
+ANALYSIS_WORKER_IDLE_SECONDS = 20.0
 _DOWNLOAD_PROCESS_POOL = None
 _DOWNLOAD_PROCESS_POOL_LOCK = threading.Lock()
+_ANALYSIS_PROCESS_POOL = None
+_ANALYSIS_PROCESS_POOL_LOCK = threading.Lock()
 
 
 def _download_worker_request(page_url, candidate, output_dir, cookie_source="없음", proxy_url=None):
@@ -1914,6 +1917,28 @@ def persistent_download_worker_command():
     if getattr(sys, "frozen", False):
         return [sys.executable, "--clipflow-download-worker", "--persistent"]
     return [sys.executable, "-u", "-m", "tools.clipflow_download_process", "--persistent"]
+
+
+def _analysis_worker_request(url, cookie_source="없음", output_ext=None, proxy_url=None):
+    return {
+        "url": url,
+        "cookie_source": cookie_source,
+        "output_ext": output_ext,
+        "proxy_url": proxy_url,
+    }
+
+
+def analysis_worker_command(request_path):
+    request_path = str(request_path)
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--clipflow-analysis-worker", request_path]
+    return [sys.executable, "-u", "-m", "tools.clipflow_analysis_process", request_path]
+
+
+def persistent_analysis_worker_command():
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--clipflow-analysis-worker", "--persistent"]
+    return [sys.executable, "-u", "-m", "tools.clipflow_analysis_process", "--persistent"]
 
 
 def _download_worker_environment():
@@ -2035,9 +2060,25 @@ class DownloadProcessPool:
         self.command_factory = command_factory or persistent_download_worker_command
         self._idle = []
         self._lock = threading.Lock()
+        self._trim_timer = None
 
     def _new_process(self):
         return PersistentDownloadProcess(command=self.command_factory())
+
+    def _schedule_trim_locked(self):
+        if not self._idle:
+            return
+        if self._trim_timer and self._trim_timer.is_alive():
+            return
+        self._trim_timer = threading.Timer(self.idle_seconds + 0.1, self._trim_from_timer)
+        self._trim_timer.daemon = True
+        self._trim_timer.start()
+
+    def _trim_from_timer(self):
+        with self._lock:
+            self._trim_locked()
+            if self._idle:
+                self._schedule_trim_locked()
 
     def _trim_locked(self):
         now = time.monotonic()
@@ -2058,8 +2099,10 @@ class DownloadProcessPool:
         with self._lock:
             self._trim_locked()
             if self._idle:
+                self._schedule_trim_locked()
                 return
             self._idle.append(self._new_process())
+            self._schedule_trim_locked()
 
     def run(self, request, on_event=None):
         with self._lock:
@@ -2072,11 +2115,194 @@ class DownloadProcessPool:
                 if worker.is_alive():
                     self._idle.append(worker)
                     self._trim_locked()
+                    self._schedule_trim_locked()
                 else:
                     worker.close()
 
     def close_all(self):
         with self._lock:
+            if self._trim_timer:
+                self._trim_timer.cancel()
+                self._trim_timer = None
+            workers = list(self._idle)
+            self._idle = []
+        for worker in workers:
+            worker.close()
+
+
+class PersistentAnalysisProcess:
+    def __init__(self, command=None):
+        self.command = command or persistent_analysis_worker_command()
+        self.process = subprocess.Popen(
+            self.command,
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=_download_worker_environment(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=_download_worker_creationflags(),
+        )
+        self.last_used = time.monotonic()
+        self._closed = False
+
+    def is_alive(self):
+        return not self._closed and self.process.poll() is None
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self.process.stdin:
+                self.process.stdin.close()
+        except Exception:
+            pass
+        try:
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+        except Exception:
+            pass
+        try:
+            if self.process.stdout:
+                self.process.stdout.close()
+        except Exception:
+            pass
+
+    def run(self, request, on_event=None):
+        if not self.is_alive() or not self.process.stdin or not self.process.stdout:
+            raise RuntimeError("Analysis worker is not running.")
+
+        result = None
+        failed_message = ""
+        side_output = []
+
+        def handle_line(line):
+            nonlocal result, failed_message
+            text = str(line or "").strip()
+            if not text:
+                return False
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                side_output.append(strip_ansi(text))
+                return False
+            payload_type = payload.get("type")
+            if payload_type == "event":
+                event = payload.get("event")
+                if isinstance(event, dict) and on_event:
+                    on_event(event)
+            elif payload_type == "finished":
+                result_value = payload.get("result")
+                result = result_value if isinstance(result_value, dict) else {}
+                return True
+            elif payload_type == "failed":
+                failed_message = strip_ansi(payload.get("message") or "Analysis worker failed.")
+                return True
+            return False
+
+        try:
+            self.process.stdin.write(json.dumps(request, ensure_ascii=False, default=str) + "\n")
+            self.process.stdin.flush()
+            while True:
+                line = self.process.stdout.readline()
+                if line == "":
+                    break
+                if handle_line(line):
+                    break
+        except BrokenPipeError as exc:
+            failed_message = strip_ansi(exc)
+
+        self.last_used = time.monotonic()
+        if failed_message:
+            raise RuntimeError(strip_ansi(failed_message))
+        if result is None:
+            code = self.process.poll()
+            suffix = f" with code {code}" if code is not None else ""
+            detail = "\n".join(side_output[-20:]) or f"Analysis worker exited unexpectedly{suffix}."
+            raise RuntimeError(strip_ansi(detail))
+        return result
+
+
+class AnalysisProcessPool:
+    def __init__(self, idle_seconds=ANALYSIS_WORKER_IDLE_SECONDS, max_idle=1, command_factory=None):
+        self.idle_seconds = idle_seconds
+        self.max_idle = max_idle
+        self.command_factory = command_factory or persistent_analysis_worker_command
+        self._idle = []
+        self._lock = threading.Lock()
+        self._trim_timer = None
+
+    def _new_process(self):
+        return PersistentAnalysisProcess(command=self.command_factory())
+
+    def _schedule_trim_locked(self):
+        if not self._idle:
+            return
+        if self._trim_timer and self._trim_timer.is_alive():
+            return
+        self._trim_timer = threading.Timer(self.idle_seconds + 0.1, self._trim_from_timer)
+        self._trim_timer.daemon = True
+        self._trim_timer.start()
+
+    def _trim_from_timer(self):
+        with self._lock:
+            self._trim_locked()
+            if self._idle:
+                self._schedule_trim_locked()
+
+    def _trim_locked(self):
+        now = time.monotonic()
+        alive = [
+            worker
+            for worker in self._idle
+            if worker.is_alive() and now - worker.last_used <= self.idle_seconds
+        ]
+        alive.sort(key=lambda worker: worker.last_used, reverse=True)
+        survivors = alive[:self.max_idle]
+        survivor_ids = {id(worker) for worker in survivors}
+        for worker in self._idle:
+            if id(worker) not in survivor_ids:
+                worker.close()
+        self._idle = survivors
+
+    def warm(self):
+        with self._lock:
+            self._trim_locked()
+            if self._idle:
+                self._schedule_trim_locked()
+                return
+            self._idle.append(self._new_process())
+            self._schedule_trim_locked()
+
+    def run(self, request, on_event=None):
+        with self._lock:
+            self._trim_locked()
+            worker = self._idle.pop() if self._idle else self._new_process()
+        try:
+            return worker.run(request, on_event=on_event)
+        finally:
+            with self._lock:
+                if worker.is_alive():
+                    self._idle.append(worker)
+                    self._trim_locked()
+                    self._schedule_trim_locked()
+                else:
+                    worker.close()
+
+    def close_all(self):
+        with self._lock:
+            if self._trim_timer:
+                self._trim_timer.cancel()
+                self._trim_timer = None
             workers = list(self._idle)
             self._idle = []
         for worker in workers:
@@ -2094,6 +2320,108 @@ def download_process_pool():
 
 def warm_download_worker():
     download_process_pool().warm()
+
+
+def analysis_process_pool():
+    global _ANALYSIS_PROCESS_POOL
+    with _ANALYSIS_PROCESS_POOL_LOCK:
+        if _ANALYSIS_PROCESS_POOL is None:
+            _ANALYSIS_PROCESS_POOL = AnalysisProcessPool()
+            atexit.register(_ANALYSIS_PROCESS_POOL.close_all)
+        return _ANALYSIS_PROCESS_POOL
+
+
+def warm_analysis_worker():
+    analysis_process_pool().warm()
+
+
+def _analyze_url_in_one_shot_worker(request, on_event=None, process_command=None):
+    temp_root = Path(tempfile.mkdtemp(prefix="clipflow-analysis-"))
+    request_path = temp_root / "request.json"
+    result = None
+    failed_message = ""
+    side_output = []
+
+    def handle_payload(payload):
+        nonlocal result, failed_message
+        if not isinstance(payload, dict):
+            return
+        payload_type = payload.get("type")
+        if payload_type == "event":
+            event = payload.get("event")
+            if isinstance(event, dict) and on_event:
+                on_event(event)
+        elif payload_type == "finished":
+            result_value = payload.get("result")
+            result = result_value if isinstance(result_value, dict) else {}
+        elif payload_type == "failed":
+            failed_message = strip_ansi(payload.get("message") or "Analysis worker failed.")
+
+    def handle_line(line):
+        text = str(line or "").strip()
+        if not text:
+            return
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            side_output.append(strip_ansi(text))
+            return
+        handle_payload(payload)
+
+    request_path.write_text(json.dumps(dict(request or {}), ensure_ascii=False, default=str), encoding="utf-8")
+    command = process_command or analysis_worker_command(request_path)
+    env = _download_worker_environment()
+    cwd = str(Path(__file__).resolve().parents[1])
+    creationflags = _download_worker_creationflags()
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creationflags,
+        )
+        if process.stdout:
+            try:
+                for line in process.stdout:
+                    handle_line(line)
+            finally:
+                process.stdout.close()
+        return_code = process.wait()
+        if failed_message or return_code:
+            detail = failed_message or "\n".join(side_output[-20:]) or f"Analysis worker exited with code {return_code}."
+            raise RuntimeError(strip_ansi(detail))
+        if result is None:
+            detail = "\n".join(side_output[-20:]) or "Analysis worker did not return a result."
+            raise RuntimeError(strip_ansi(detail))
+        return result
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def analyze_url_in_subprocess(
+    url,
+    cookie_source="없음",
+    output_ext=None,
+    on_event=None,
+    proxy_url=None,
+    process_command=None,
+):
+    request = _analysis_worker_request(
+        url,
+        cookie_source=cookie_source,
+        output_ext=output_ext,
+        proxy_url=proxy_url,
+    )
+    if process_command is not None:
+        return _analyze_url_in_one_shot_worker(request, on_event=on_event, process_command=process_command)
+    return analysis_process_pool().run(request, on_event=on_event)
 
 
 def _download_candidate_in_one_shot_worker(request, on_event=None, process_command=None):

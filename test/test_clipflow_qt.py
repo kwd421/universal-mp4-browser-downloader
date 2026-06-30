@@ -70,6 +70,38 @@ print(ClipFlowWindow.__name__)
             ],
         )
 
+    def test_clipflow_entry_dispatches_analysis_worker_before_gui_import(self):
+        script = r'''
+import sys
+import types
+from tools import clipflow_entry
+
+called = []
+
+analysis_module = types.ModuleType("tools.clipflow_analysis_process")
+analysis_module.main = lambda argv=None: called.append(list(argv or [])) or 17
+gui_module = types.ModuleType("tools.clipflow_qt")
+gui_module.main = lambda: (_ for _ in ()).throw(AssertionError("GUI should not import for analysis worker"))
+sys.modules["tools.clipflow_analysis_process"] = analysis_module
+sys.modules["tools.clipflow_qt"] = gui_module
+sys.argv = ["ClipFlow.exe", "--clipflow-analysis-worker", "--persistent"]
+
+print(clipflow_entry.main())
+print(called)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["17", "[['--clipflow-analysis-worker', '--persistent']]"])
+
+    def test_clipflow_spec_includes_analysis_worker_hidden_import(self):
+        from pathlib import Path
+
+        text = Path("build-helper/ClipFlow.spec").read_text(encoding="utf-8")
+        self.assertIn("tools.clipflow_analysis_process", text)
+        self.assertIn("tools.clipflow_download_process", text)
+        self.assertIn("tools.clipflow_qt", text)
+
     def test_clipflow_qt_uses_bundled_lucide_icons(self):
         script = r'''
 import tools.clipflow_widgets as widgets
@@ -3132,52 +3164,104 @@ print(callback_threads)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "[True, True]")
 
-    def test_clipflow_qt_default_engine_preloads_ytdlp_factory_on_ui_thread(self):
+    def test_clipflow_qt_default_engine_does_not_preload_ytdlp_or_ffmpeg_on_startup(self):
         script = r'''
-from PySide6.QtCore import QThread
+import sys
 from PySide6.QtWidgets import QApplication
-from tools import clipflow_qt
+from tools.clipflow_qt import ClipFlowWindow
 
 app = QApplication([])
-factory = object()
-calls = []
-ffmpeg_calls = []
-windows_version_calls = []
-original_factory = clipflow_qt.engine.youtube_dl_factory
-original_ffmpeg = clipflow_qt.engine.ffmpeg_path
-original_windows_version = clipflow_qt.engine.yt_dlp_windows_version
-
-def fake_factory():
-    calls.append(QThread.currentThread() is app.thread())
-    return factory
-
-def fake_ffmpeg():
-    ffmpeg_calls.append(QThread.currentThread() is app.thread())
-    return None
-
-def fake_windows_version():
-    windows_version_calls.append(QThread.currentThread() is app.thread())
-    return (10, 0)
-
-clipflow_qt.engine.youtube_dl_factory = fake_factory
-clipflow_qt.engine.ffmpeg_path = fake_ffmpeg
-clipflow_qt.engine.yt_dlp_windows_version = fake_windows_version
-try:
-    window = clipflow_qt.ClipFlowWindow()
-finally:
-    clipflow_qt.engine.youtube_dl_factory = original_factory
-    clipflow_qt.engine.ffmpeg_path = original_ffmpeg
-    clipflow_qt.engine.yt_dlp_windows_version = original_windows_version
-
-print(calls)
-print(ffmpeg_calls)
-print(windows_version_calls)
-print(window._default_ydl_factory is factory)
+window = ClipFlowWindow()
+print("yt_dlp" in sys.modules)
+print("imageio_ffmpeg" in sys.modules)
+print(hasattr(window.analyze_func, "_clipflow_uses_analysis_worker_pool"))
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["[True]", "[True]", "[True]", "True"])
+        self.assertEqual(result.stdout.splitlines(), ["False", "False", "True"])
+
+    def test_clipflow_qt_default_analysis_uses_subprocess_boundary(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools import clipflow_qt
+
+app = QApplication([])
+calls = []
+events = []
+original = clipflow_qt.engine.analyze_url_in_subprocess
+
+def fake_process(url, cookie_source=None, output_ext=None, on_event=None, proxy_url=None):
+    calls.append([url, cookie_source, output_ext, proxy_url])
+    if on_event:
+        on_event({"type": "status", "message": "URL 분석 중"})
+    return {"webpage_url": url, "url": url, "candidates": [], "warnings": []}
+
+clipflow_qt.engine.analyze_url_in_subprocess = fake_process
+try:
+    window = clipflow_qt.ClipFlowWindow()
+    result = window.analyze_func(
+        "https://media.test/watch",
+        cookie_source="Firefox",
+        output_ext="MP4",
+        proxy_url="http://127.0.0.1:8080",
+        on_event=events.append,
+    )
+finally:
+    clipflow_qt.engine.analyze_url_in_subprocess = original
+
+print(calls)
+print(events)
+print(result["webpage_url"])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "[['https://media.test/watch', 'Firefox', 'MP4', 'http://127.0.0.1:8080']]",
+                "[{'type': 'status', 'message': 'URL 분석 중'}]",
+                "https://media.test/watch",
+            ],
+        )
+
+    def test_clipflow_qt_custom_analysis_function_bypasses_subprocess_boundary(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools import clipflow_qt
+
+app = QApplication([])
+calls = []
+original = clipflow_qt.engine.analyze_url_in_subprocess
+
+def forbidden_process(*_args, **_kwargs):
+    raise AssertionError("default analysis subprocess should not be used")
+
+def fake_analyze(url, cookie_source=None, output_ext=None, on_event=None, proxy_url=None):
+    calls.append([url, cookie_source, output_ext, proxy_url])
+    return {"webpage_url": url, "url": url, "candidates": [], "warnings": []}
+
+clipflow_qt.engine.analyze_url_in_subprocess = forbidden_process
+try:
+    window = clipflow_qt.ClipFlowWindow(analyze_func=fake_analyze)
+    result = window.analyze_func("https://media.test/custom", cookie_source="None", output_ext="WEBM", proxy_url="proxy")
+finally:
+    clipflow_qt.engine.analyze_url_in_subprocess = original
+
+print(calls)
+print(result["webpage_url"])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "[['https://media.test/custom', 'None', 'WEBM', 'proxy']]",
+                "https://media.test/custom",
+            ],
+        )
 
     def test_clipflow_qt_default_download_uses_subprocess_boundary(self):
         script = r'''
