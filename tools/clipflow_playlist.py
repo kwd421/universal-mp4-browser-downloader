@@ -723,12 +723,14 @@ class PlaylistMixin:
         playlist_dir = Path(playlist_dir).expanduser()
         paths = []
         for child in self._playlist_children_for_parent(row):
-            saved_output = child.get("output_path") or ""
-            if saved_output:
-                path = Path(saved_output).expanduser()
-            else:
-                path = engine.existing_output_path_for_candidate(child.get("candidate") or {}, playlist_dir)
-            if path and path.exists() and path.is_file():
+            child_paths = self._download_output_paths_for_row(child) if hasattr(self, "_download_output_paths_for_row") else []
+            if not child_paths:
+                saved_output = child.get("output_path") or ""
+                path = Path(saved_output).expanduser() if saved_output else engine.existing_output_path_for_candidate(child.get("candidate") or {}, playlist_dir)
+                child_paths = [path] if path else []
+            for path in child_paths:
+                if not path or not path.exists() or not path.is_file():
+                    continue
                 try:
                     path.relative_to(playlist_dir)
                 except ValueError:

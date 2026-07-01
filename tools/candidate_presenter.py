@@ -57,8 +57,6 @@ def candidate_visible_quality_key(candidate):
 def quality_label(candidate):
     ext = str(candidate.get("output_ext") or candidate.get("ext") or "").upper()
     size = engine.display_size(candidate.get("sort_bytes"))
-    if size != "unknown" and candidate.get("size_source") == "clen_estimate":
-        size = f"예상 {size}"
     if candidate.get("media_type") == "audio" or ext == "WAV":
         note = candidate.get("note") or "audio"
         return f"{ext} · {size} · {note}"

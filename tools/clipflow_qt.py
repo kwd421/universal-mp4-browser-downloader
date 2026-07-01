@@ -59,13 +59,13 @@ except ImportError:
 try:
     from tools.clipflow_theme import (
         ANALYZING_STATUS, AUTO_LABEL, COMPLETED_STATUS, DOWNLOAD_HISTORY_SETTING, DOWNLOAD_STATUS, ERROR_STATUS,
-        READY_STATUS, SAVE_FOLDER_SETTING, SETTINGS_APP, SETTINGS_ORG, SORT_DESC_SETTING, SORT_KEY_SETTING,
+        PAUSED_STATUS, READY_STATUS, SAVE_FOLDER_SETTING, SETTINGS_APP, SETTINGS_ORG, SORT_DESC_SETTING, SORT_KEY_SETTING,
         SORT_LABELS, WAITING_STATUS, WINDOW_SIZE_SETTING,
     )
 except ImportError:
     from clipflow_theme import (
         ANALYZING_STATUS, AUTO_LABEL, COMPLETED_STATUS, DOWNLOAD_HISTORY_SETTING, DOWNLOAD_STATUS, ERROR_STATUS,
-        READY_STATUS, SAVE_FOLDER_SETTING, SETTINGS_APP, SETTINGS_ORG, SORT_DESC_SETTING, SORT_KEY_SETTING,
+        PAUSED_STATUS, READY_STATUS, SAVE_FOLDER_SETTING, SETTINGS_APP, SETTINGS_ORG, SORT_DESC_SETTING, SORT_KEY_SETTING,
         SORT_LABELS, WAITING_STATUS, WINDOW_SIZE_SETTING,
     )
 
@@ -115,6 +115,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         download_func=engine.download_candidate,
         open_url_func=None,
         confirm_delete_func=None,
+        playlist_choice_func=None,
     ):
         super().__init__()
         app = QApplication.instance()
@@ -163,6 +164,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.sort_desc = str(self.settings.value(SORT_DESC_SETTING, "true", str)).lower() != "false"
         self.open_url_func = open_url_func or (lambda url: QDesktopServices.openUrl(QUrl(url)))
         self.confirm_delete_func = confirm_delete_func
+        self.playlist_choice_func = playlist_choice_func
         self.analysis = None
         self.rows = []
         self.analysis_thread = None
@@ -668,6 +670,9 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         url = self.url_input.text().strip()
         if not url:
             return
+        url = self._resolve_playlist_choice_url(url)
+        if not url:
+            return
 
         self.analysis = None
         self.selected_row_index = -1
@@ -705,6 +710,57 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.analysis_thread.finished.connect(self.analysis_worker.deleteLater)
         self.analysis_thread.finished.connect(self._analysis_thread_finished)
         self.analysis_thread.start()
+
+    def _resolve_playlist_choice_url(self, url):
+        url = str(url or "").strip()
+        if not engine.needs_youtube_playlist_choice(url):
+            return url
+        chooser = self.playlist_choice_func or self._show_playlist_choice_dialog
+        choice = chooser(url)
+        if choice == "single":
+            return engine.youtube_single_video_url(url)
+        if choice == "playlist":
+            return engine.youtube_playlist_url(url)
+        return None
+
+    def _show_playlist_choice_dialog(self, url):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("다운로드 방식 선택")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(380)
+        choice = {"value": None}
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(12)
+        title = QLabel("이 링크는 영상과 재생목록을 함께 가리켜요")
+        title.setObjectName("SectionTitle")
+        title.setWordWrap(True)
+        detail = QLabel(str(url))
+        detail.setObjectName("MetaText")
+        detail.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(detail)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("취소")
+        cancel.setObjectName("SecondaryButton")
+        single = QPushButton("단일 영상")
+        playlist = QPushButton("재생목록")
+
+        def choose(value):
+            choice["value"] = value
+            dialog.accept()
+
+        cancel.clicked.connect(dialog.reject)
+        single.clicked.connect(lambda: choose("single"))
+        playlist.clicked.connect(lambda: choose("playlist"))
+        buttons.addWidget(cancel)
+        buttons.addWidget(single)
+        buttons.addWidget(playlist)
+        layout.addLayout(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return choice["value"]
 
     def _analysis_loading_rows(self, url):
         if engine.looks_like_playlist_url(url):
@@ -930,7 +986,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     def _should_preserve_existing_row(self, row):
         if self._is_analysis_loading_row(row):
             return False
-        if row.get("status") in {COMPLETED_STATUS, DOWNLOAD_STATUS, WAITING_STATUS}:
+        if row.get("status") in {COMPLETED_STATUS, DOWNLOAD_STATUS, WAITING_STATUS, PAUSED_STATUS}:
             return True
         return self._row_is_downloading(row) or row in self.queued_download_rows
 

@@ -17,7 +17,7 @@ try:
     from tools.clipflow_workers import DownloadWorker
     from tools.clipflow_theme import (
         ANALYZING_STATUS, COMPLETED_STATUS, DOWNLOAD_CONCURRENCY, DOWNLOAD_STATUS, ERROR_STATUS,
-        READY_STATUS, WAITING_STATUS, cookie_source_from_display,
+        PAUSED_STATUS, READY_STATUS, WAITING_STATUS, cookie_source_from_display,
     )
 except ImportError:
     import downloader_engine as engine
@@ -25,7 +25,7 @@ except ImportError:
     from clipflow_workers import DownloadWorker
     from clipflow_theme import (
         ANALYZING_STATUS, COMPLETED_STATUS, DOWNLOAD_CONCURRENCY, DOWNLOAD_STATUS, ERROR_STATUS,
-        READY_STATUS, WAITING_STATUS, cookie_source_from_display,
+        PAUSED_STATUS, READY_STATUS, WAITING_STATUS, cookie_source_from_display,
     )
 
 
@@ -73,9 +73,46 @@ class DownloadMixin:
             "messages": [],
             "created_order": order,
         }
+        source_path = self._audio_extract_source_path(row)
+        if source_path:
+            audio_row["local_audio_source_path"] = str(source_path)
         self.rows.insert(self.rows.index(row) + 1, audio_row)
         self._render_rows()
         self.start_download_for_row(audio_row)
+
+    def _audio_extract_source_path(self, row):
+        base = row.get("candidate") or {}
+        saved_output = row.get("output_path") or ""
+        if saved_output:
+            saved_path = Path(saved_output).expanduser()
+            if engine.completed_output_exists(saved_path, base):
+                return saved_path
+        existing = self._existing_output_path_for_row(row, base) if base else None
+        if existing and engine.completed_output_exists(existing, base):
+            return existing
+        return None
+
+    def _local_audio_download_func_for_row(self, row, candidate):
+        source_value = row.get("local_audio_source_path") or ""
+        if not source_value:
+            return None
+        ext = engine.normalized_output_ext((candidate or {}).get("output_ext") or (candidate or {}).get("ext"))
+        if ext not in engine.AUDIO_OUTPUT_EXTENSIONS:
+            return None
+        source_path = Path(source_value).expanduser()
+        if not source_path.is_file():
+            return None
+
+        def convert_local_audio(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+            del page_url, candidate, output_dir, cookie_source, proxy_url
+            return engine.convert_existing_media_to_audio(
+                source_path,
+                ext,
+                output_dir=source_path.parent,
+                on_event=on_event,
+            )
+
+        return convert_local_audio
 
     def start_download_for_row(self, row):
         if row not in self.rows:
@@ -108,7 +145,11 @@ class DownloadMixin:
             self._refresh_footer()
             return
 
-        self._begin_download(row, candidate)
+        download_func = self._local_audio_download_func_for_row(row, candidate)
+        if download_func:
+            self._begin_download(row, candidate, download_func=download_func)
+        else:
+            self._begin_download(row, candidate)
 
     def _playlist_children_for_parent(self, parent):
         parent_id = parent.get("id")
@@ -162,6 +203,7 @@ class DownloadMixin:
         self._refresh_playlist_parent_metadata(parent)
         completed = sum(1 for row in children if row.get("status") == COMPLETED_STATUS)
         active = sum(1 for row in children if row.get("status") in {DOWNLOAD_STATUS, WAITING_STATUS})
+        paused = sum(1 for row in children if row.get("status") == PAUSED_STATUS)
         failed = sum(1 for row in children if row.get("status") == ERROR_STATUS)
         total = max(1, total)
         progress = int(sum(engine.safe_int(row.get("progress")) for row in children) / total)
@@ -172,6 +214,10 @@ class DownloadMixin:
             progress_text = ""
         elif active:
             status = DOWNLOAD_STATUS
+            detail = f"{completed}/{total}"
+            progress_text = f"{progress}%"
+        elif paused:
+            status = PAUSED_STATUS
             detail = f"{completed}/{total}"
             progress_text = f"{progress}%"
         elif failed:
@@ -191,11 +237,12 @@ class DownloadMixin:
             widget.set_status(status, detail)
             widget.set_progress(progress, progress_text)
 
-    def _begin_download(self, row, candidate=None):
+    def _begin_download(self, row, candidate=None, download_func=None):
         candidate = candidate or self.selected_candidate_for_row_ref(row)
         if not candidate:
             return
         download_candidate = self._candidate_for_download(row, candidate) if hasattr(self, "_candidate_for_download") else candidate
+        download_candidate["_clipflow_row_id"] = str(row.get("id") or "")
         self.primary_button.set_loading(False)
         self.selected_row_index = self.rows.index(row)
         self._refresh_row_selection()
@@ -215,7 +262,7 @@ class DownloadMixin:
             download_candidate,
             self._output_dir_for_row(row, candidate),
             cookie_source_from_display(self.cookie_combo.currentText()),
-            self.download_func,
+            download_func or self.download_func,
         )
         self.active_downloads.append({"thread": thread, "worker": worker, "row": row})
         self._sync_legacy_download_refs()
@@ -234,6 +281,99 @@ class DownloadMixin:
 
     def _row_is_downloading(self, row):
         return any(item.get("row") is row for item in self.active_downloads)
+
+    def pause_download_for_row(self, row):
+        if not row or row not in self.rows:
+            return
+        if row.get("kind") == "playlist":
+            for child in self._playlist_children_for_parent(row):
+                if child.get("status") in {DOWNLOAD_STATUS, WAITING_STATUS} or child in self.queued_download_rows:
+                    self.pause_download_for_row(child)
+            self._set_row_paused(row)
+            self._refresh_parent_for_child(row)
+            self._refresh_footer()
+            return
+        if row in self.queued_download_rows:
+            self.queued_download_rows = [queued for queued in self.queued_download_rows if queued is not row]
+            self._set_row_paused(row)
+            self._sync_legacy_download_refs()
+            self._refresh_primary_action()
+            self._refresh_footer()
+            self._refresh_parent_for_child(row)
+            return
+        items = [item for item in self.active_downloads if item.get("row") is row]
+        if not items:
+            return
+        row["download_cancel_requested"] = True
+        for item in items:
+            self._cancel_active_download_item(item)
+        self.active_downloads = [item for item in self.active_downloads if item.get("row") is not row]
+        self._set_row_paused(row)
+        self._sync_legacy_download_refs()
+        self._refresh_primary_action()
+        self._refresh_footer()
+        self._refresh_parent_for_child(row)
+        self._start_queued_downloads()
+
+    def _cancel_active_download_item(self, item):
+        row = item.get("row")
+        row_id = str((row or {}).get("id") or "")
+        if row_id:
+            try:
+                engine.cancel_download_request(row_id)
+            except Exception:
+                pass
+        thread = item.get("thread")
+        if thread:
+            for method_name in ("requestInterruption", "quit"):
+                method = getattr(thread, method_name, None)
+                if callable(method):
+                    method()
+            wait = getattr(thread, "wait", None)
+            stopped = True
+            if callable(wait):
+                try:
+                    stopped = bool(wait(800))
+                except TypeError:
+                    stopped = bool(wait())
+            if not stopped:
+                terminate = getattr(thread, "terminate", None)
+                if callable(terminate):
+                    terminate()
+                if callable(wait):
+                    try:
+                        wait(1000)
+                    except TypeError:
+                        wait()
+
+    def _set_row_paused(self, row):
+        row["download_starting"] = False
+        row["status"] = PAUSED_STATUS
+        row["status_detail"] = ""
+        row["progress_text"] = row.get("progress_text") or ""
+        widget = row.get("widget")
+        if widget:
+            widget.set_status(PAUSED_STATUS)
+            widget.set_progress(row.get("progress") or 0, row.get("progress_text") or "")
+            widget._refresh_actions()
+        self._set_status(PAUSED_STATUS)
+
+    def resume_download_for_row(self, row):
+        if not row or row not in self.rows:
+            return
+        if row.get("kind") == "playlist":
+            for child in self._playlist_children_for_parent(row):
+                if child.get("status") == PAUSED_STATUS:
+                    self.resume_download_for_row(child)
+            self._refresh_playlist_parent_status(row)
+            return
+        if row.get("status") == PAUSED_STATUS:
+            row.pop("download_cancel_requested", None)
+            row["status"] = READY_STATUS
+            widget = row.get("widget")
+            if widget:
+                widget.set_status(READY_STATUS)
+            self.start_download_for_row(row)
 
     def _sync_legacy_download_refs(self):
         first = self.active_downloads[0] if self.active_downloads else None
@@ -350,6 +490,9 @@ class DownloadMixin:
 
     def _download_finished_for(self, row, result):
         if row:
+            if row.pop("download_cancel_requested", False):
+                self._set_row_paused(row)
+                return
             row["download_starting"] = False
             selected = self.selected_candidate_for_row_ref(row)
             if selected:
@@ -415,6 +558,9 @@ class DownloadMixin:
     def _download_failed_for(self, row, message):
         message = engine.strip_ansi(message)
         if row:
+            if row.pop("download_cancel_requested", False):
+                self._set_row_paused(row)
+                return
             row["download_starting"] = False
             widget = row.get("widget")
             row["messages"].append(message)
@@ -469,4 +615,8 @@ class DownloadMixin:
             if existing_output:
                 self._mark_existing_output(row, existing_output)
                 continue
-            self._begin_download(row, candidate)
+            download_func = self._local_audio_download_func_for_row(row, candidate)
+            if download_func:
+                self._begin_download(row, candidate, download_func=download_func)
+            else:
+                self._begin_download(row, candidate)

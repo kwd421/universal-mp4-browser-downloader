@@ -394,6 +394,98 @@ print(window.cookie_combo.maximumWidth() <= 142)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["False", "False", "True", "True", "True"])
 
+    def test_clipflow_qt_extract_audio_converts_existing_file_without_redownloading(self):
+        script = r'''
+import tempfile
+from pathlib import Path
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from tools import downloader_engine as engine
+from tools.clipflow_qt import ClipFlowWindow
+
+tempdir = tempfile.TemporaryDirectory()
+source = Path(tempdir.name) / "Already Downloaded.mp4"
+source.write_bytes(b"video")
+calls = {"download": 0, "convert": []}
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    calls["download"] += 1
+    raise AssertionError("network download should not run for existing audio extraction")
+
+def fake_convert(input_path, output_ext, output_dir=None, on_event=None, ffmpeg_exe=None, runner=None):
+    output = Path(output_dir or Path(input_path).parent) / (Path(input_path).stem + "." + str(output_ext).lower())
+    calls["convert"].append((str(input_path), str(output_ext).lower(), str(output_dir)))
+    output.write_bytes(b"audio")
+    if on_event:
+        on_event({"type": "file", "path": str(output)})
+    return {"ok": True, "output_dir": str(output.parent), "output_path": str(output)}
+
+original_convert = getattr(engine, "convert_existing_media_to_audio", None)
+engine.convert_existing_media_to_audio = fake_convert
+
+try:
+    app = QApplication([])
+    window = ClipFlowWindow(download_func=fake_download)
+    window.folder_input.setText(tempdir.name)
+    row = {
+        "id": "row-1",
+        "kind": "video",
+        "candidate": {
+            "id": "row-1",
+            "source": "https://media.test/watch/1",
+            "url": "https://media.test/watch/1",
+            "title": "Already Downloaded",
+            "display_title": "Already Downloaded",
+            "thumbnail": "",
+            "ext": "mp4",
+            "output_ext": "mp4",
+            "duration": 1,
+        },
+        "qualities": [],
+        "quality_options": [],
+        "selected_index": 0,
+        "selected_format_index": 0,
+        "source_url": "https://media.test/watch/1",
+        "input_url": "https://media.test/watch/1",
+        "status": "완료",
+        "messages": [],
+        "progress": 100,
+        "progress_text": "",
+        "output_path": str(source),
+        "created_order": 1,
+    }
+    window.rows = [row]
+    window._render_rows()
+    window.extract_audio_for_row(row, "MP3")
+
+    def drive():
+        if window.active_downloads:
+            return
+        audio_row = window.rows[1]
+        print(calls["download"])
+        print(calls["convert"][0][0] == str(source))
+        print(calls["convert"][0][1])
+        print(Path(audio_row["output_path"]).name)
+        print(audio_row["status"])
+        tempdir.cleanup()
+        app.quit()
+
+    timer = QTimer()
+    timer.timeout.connect(drive)
+    timer.start(20)
+    QTimer.singleShot(3000, app.quit)
+    app.exec()
+finally:
+    if original_convert is None:
+        delattr(engine, "convert_existing_media_to_audio")
+    else:
+        engine.convert_existing_media_to_audio = original_convert
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["0", "True", "mp3", "Already Downloaded.mp3", "완료"])
+
     def test_clipflow_qt_download_preferences_persist_with_qsettings(self):
         script = r'''
 import tempfile
@@ -2824,6 +2916,144 @@ app.exec()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["2", "1"])
 
+    def test_clipflow_qt_pauses_resumes_and_deletes_partial_download_files(self):
+        script = r'''
+import tempfile
+from pathlib import Path
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_theme import DOWNLOAD_STATUS, PAUSED_STATUS
+
+class FakeThread:
+    def __init__(self):
+        self.calls = []
+
+    def requestInterruption(self):
+        self.calls.append("requestInterruption")
+
+    def quit(self):
+        self.calls.append("quit")
+
+    def wait(self, timeout):
+        self.calls.append(f"wait:{timeout}")
+        return True
+
+    def terminate(self):
+        self.calls.append("terminate")
+
+app = QApplication([])
+tempdir = tempfile.TemporaryDirectory()
+window = ClipFlowWindow(confirm_delete_func=lambda path: True)
+window.folder_input.setText(tempdir.name)
+candidate = {
+    "id": "one",
+    "source": "https://media.test/video",
+    "url": "https://media.test/video",
+    "title": "Video",
+    "display_title": "Video",
+    "thumbnail": "",
+    "ext": "mp4",
+    "output_ext": "mp4",
+    "duration": 120,
+    "sort_bytes": 30,
+}
+row = {
+    "id": "row-1",
+    "kind": "video",
+    "candidate": candidate,
+    "qualities": [candidate],
+    "quality_options": [],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "analysis_source_url": candidate["url"],
+    "source_url": candidate["url"],
+    "input_url": candidate["url"],
+    "status": DOWNLOAD_STATUS,
+    "status_detail": "",
+    "progress": 43,
+    "progress_text": "43%",
+    "output_path": "",
+    "messages": [],
+    "created_order": 1,
+}
+window.rows = [row]
+window._render_rows()
+thread = FakeThread()
+window.active_downloads = [{"thread": thread, "worker": None, "row": row}]
+
+window.pause_download_for_row(row)
+print(row["status"])
+print(len(window.active_downloads))
+print(thread.calls)
+
+started = []
+window.start_download_for_row = lambda resumed: started.append(resumed is row)
+window.resume_download_for_row(row)
+print(started)
+
+row["status"] = PAUSED_STATUS
+for suffix in ("Video.mp4.part", "Video.mp4.ytdl", "Video.mp4.part-Frag3.part"):
+    (Path(tempdir.name) / suffix).write_text("partial", encoding="utf-8")
+window.delete_file_for_row(row)
+print([(Path(tempdir.name) / suffix).exists() for suffix in ("Video.mp4.part", "Video.mp4.ytdl", "Video.mp4.part-Frag3.part")])
+print(row in window.rows)
+tempdir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "일시정지",
+                "0",
+                "['requestInterruption', 'quit', 'wait:800']",
+                "[True]",
+                "[False, False, False]",
+                "False",
+            ],
+        )
+
+    def test_clipflow_qt_download_rows_swap_hover_actions_for_pause_and_resume(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+from tools.clipflow_theme import DOWNLOAD_STATUS, PAUSED_STATUS
+
+url = "https://media.test/video"
+
+app = QApplication([])
+window = ClipFlowWindow()
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Video",
+    "candidates": [
+        {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": 120, "sort_bytes": 30},
+    ],
+    "warnings": [],
+})
+row = window.rows[0]
+widget = row["widget"]
+widget.set_status(DOWNLOAD_STATUS)
+widget._set_hovered(True)
+app.processEvents()
+print(not widget.pause_download_button.isHidden())
+print(not widget.resume_download_button.isHidden())
+print(not widget.delete_file_button.isHidden())
+
+widget.set_status(PAUSED_STATUS)
+widget._set_hovered(True)
+app.processEvents()
+print(not widget.pause_download_button.isHidden())
+print(not widget.resume_download_button.isHidden())
+print(not widget.delete_file_button.isHidden())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["True", "False", "False", "False", "True", "True"])
+
     def test_clipflow_qt_concurrent_downloads_keep_progress_on_distinct_repeated_analysis_rows(self):
         script = r'''
 import time
@@ -3915,6 +4145,37 @@ print(result["webpage_url"])
                 "[['https://media.test/watch', 'Firefox', 'MP4', 'http://127.0.0.1:8080']]",
                 "[{'type': 'status', 'message': 'URL 분석 중'}]",
                 "https://media.test/watch",
+            ],
+        )
+
+    def test_clipflow_qt_resolves_ambiguous_youtube_playlist_choice(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://youtu.be/7DAFS8sga2k?list=PL5cMV8jURyS9R5ideqDxaIguOnbby9MVs"
+
+app = QApplication([])
+single = ClipFlowWindow(playlist_choice_func=lambda value: "single")
+playlist = ClipFlowWindow(playlist_choice_func=lambda value: "playlist")
+cancelled = ClipFlowWindow(playlist_choice_func=lambda value: None)
+plain = ClipFlowWindow(playlist_choice_func=lambda value: (_ for _ in ()).throw(AssertionError("should not ask")))
+
+print(single._resolve_playlist_choice_url(url))
+print(playlist._resolve_playlist_choice_url(url))
+print(cancelled._resolve_playlist_choice_url(url))
+print(plain._resolve_playlist_choice_url("https://youtu.be/Kc-JF2eSmt8"))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "https://youtu.be/7DAFS8sga2k",
+                "https://www.youtube.com/playlist?list=PL5cMV8jURyS9R5ideqDxaIguOnbby9MVs",
+                "None",
+                "https://youtu.be/Kc-JF2eSmt8",
             ],
         )
 
@@ -5333,6 +5594,29 @@ print(shadow_pixel.red() < 230)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True", "True", "True", "True", "True", "True", "True"])
+
+    def test_clipflow_qt_tooltip_sits_close_to_hovered_icon(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_icons import CustomTooltip, LucideIconButton, show_tooltip_above
+
+app = QApplication([])
+button = LucideIconButton("folder", size=32, icon_size=18)
+button.move(200, 200)
+button.show()
+app.processEvents()
+show_tooltip_above(button, "폴더 열기")
+app.processEvents()
+tooltip = CustomTooltip.instance()
+button_top = button.mapToGlobal(button.rect().topLeft()).y()
+gap = button_top - tooltip.geometry().bottom()
+print(gap)
+print(0 <= gap <= 4)
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "True")
 
 
 if __name__ == "__main__":

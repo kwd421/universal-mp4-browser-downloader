@@ -888,6 +888,36 @@ for line in sys.stdin:
             self.assertEqual(options["postprocessors"][0]["key"], "FFmpegExtractAudio")
             self.assertEqual(options["postprocessors"][0]["preferredcodec"], output_ext)
 
+    def test_convert_existing_media_to_audio_uses_ffmpeg_without_downloading(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "Already Downloaded.mp4"
+            source.write_bytes(b"video")
+            output = Path(temp) / "Already Downloaded.mp3"
+            calls = []
+            events = []
+
+            class Completed:
+                returncode = 0
+                stderr = ""
+                stdout = ""
+
+            def fake_runner(command, **kwargs):
+                calls.append((command, kwargs))
+                output.write_bytes(b"audio")
+                return Completed()
+
+            result = engine.convert_existing_media_to_audio(
+                source,
+                "MP3",
+                on_event=events.append,
+                ffmpeg_exe="ffmpeg-test",
+                runner=fake_runner,
+            )
+
+            self.assertEqual(result["output_path"], str(output))
+            self.assertEqual(calls[0][0], ["ffmpeg-test", "-y", "-i", str(source), "-vn", str(output)])
+            self.assertTrue(any(event.get("type") == "file" and event.get("path") == str(output) for event in events))
+
     def test_download_options_pass_browser_dom_referer_and_origin_headers(self):
         candidate = {
             "format_selector": "best",
@@ -937,7 +967,64 @@ for line in sys.stdin:
     def test_watch_urls_with_list_query_are_treated_as_playlist_links(self):
         self.assertTrue(engine.looks_like_playlist_url("https://video.example/watch?v=one&list=RDone&index=1"))
         self.assertTrue(engine.looks_like_playlist_url("https://video.example/watch?v=one&list=PL123"))
+        self.assertFalse(engine.looks_like_playlist_url("https://www.youtube.com/watch?v=one&list=RDone&start_radio=1"))
+        self.assertFalse(engine.looks_like_playlist_url("https://www.youtube.com/watch?v=one&list=RDone"))
+        self.assertFalse(engine.looks_like_playlist_url("https://youtu.be/one?list=RDone"))
+        self.assertTrue(engine.looks_like_playlist_url("https://www.youtube.com/watch?v=one&list=PL123"))
         self.assertFalse(engine.looks_like_playlist_url("https://video.example/watch?v=one"))
+
+    def test_youtube_video_list_urls_resolve_to_single_or_playlist_urls(self):
+        short_url = "https://youtu.be/7DAFS8sga2k?list=PL5cMV8jURyS9R5ideqDxaIguOnbby9MVs"
+        watch_url = "https://www.youtube.com/watch?v=7DAFS8sga2k&list=PL5cMV8jURyS9R5ideqDxaIguOnbby9MVs&index=3&pp=abc"
+
+        self.assertTrue(engine.needs_youtube_playlist_choice(short_url))
+        self.assertTrue(engine.needs_youtube_playlist_choice(watch_url))
+        self.assertFalse(engine.needs_youtube_playlist_choice("https://www.youtube.com/playlist?list=PL5cMV8jURyS9R5ideqDxaIguOnbby9MVs"))
+        self.assertFalse(engine.needs_youtube_playlist_choice("https://youtu.be/Kc-JF2eSmt8"))
+        self.assertEqual(engine.youtube_single_video_url(short_url), "https://youtu.be/7DAFS8sga2k")
+        self.assertEqual(engine.youtube_single_video_url(watch_url), "https://www.youtube.com/watch?v=7DAFS8sga2k")
+        self.assertEqual(
+            engine.youtube_playlist_url(short_url),
+            "https://www.youtube.com/playlist?list=PL5cMV8jURyS9R5ideqDxaIguOnbby9MVs",
+        )
+        self.assertEqual(
+            engine.youtube_playlist_url(watch_url),
+            "https://www.youtube.com/playlist?list=PL5cMV8jURyS9R5ideqDxaIguOnbby9MVs",
+        )
+
+    def test_analyze_youtube_radio_watch_url_strips_playlist_query(self):
+        class RadioYoutubeDL(FakeYoutubeDL):
+            requested_urls = []
+
+            def extract_info(self, url, download=False):
+                RadioYoutubeDL.requested_urls.append(url)
+                return {
+                    "id": "one",
+                    "title": "One",
+                    "webpage_url": url,
+                    "duration": 60,
+                    "formats": [
+                        {
+                            "format_id": "18",
+                            "ext": "mp4",
+                            "height": 720,
+                            "width": 1280,
+                            "vcodec": "avc1.64001F",
+                            "acodec": "mp4a.40.2",
+                            "filesize": 800,
+                        }
+                    ],
+                }
+
+        result = engine.analyze_url(
+            "https://www.youtube.com/watch?v=I8Lqr6NeG5o&list=RDI8Lqr6NeG5o&start_radio=1&pp=oAcB",
+            ydl_factory=RadioYoutubeDL,
+            output_ext="mp4",
+            on_event=lambda event: None,
+        )
+
+        self.assertFalse(result.get("is_playlist"))
+        self.assertEqual(RadioYoutubeDL.requested_urls, ["https://www.youtube.com/watch?v=I8Lqr6NeG5o"])
 
     def test_analyze_url_emits_playlist_analysis_events(self):
         class PlaylistYoutubeDL(FakeYoutubeDL):
@@ -1258,6 +1345,165 @@ for line in sys.stdin:
             engine.find_chzzk_clip_uid("https://chzzk.naver.com/clips/qwr3h4r3Yn"),
             "qwr3h4r3Yn",
         )
+
+    def test_chzzk_clip_analysis_prefixes_channel_and_uses_duration(self):
+        original_detail = engine.chzzk_clip_detail
+        original_card = engine.chzzk_shortform_card
+        original_enrich = engine.enrich_missing_sizes
+        try:
+            engine.chzzk_clip_detail = lambda clip_uid: {
+                "content": {
+                    "clipTitle": "Clip Title",
+                    "duration": 15,
+                    "videoId": "video-id",
+                    "recId": "rec-id",
+                }
+            }
+            engine.chzzk_shortform_card = lambda clip_uid, video_id, rec_id: {
+                "card": {"vod": {"BaseURL": ["https://cdn.example.test/clip.mp4"], "@width": 1280, "@height": 720}},
+                "interaction": {"subscription": {"name": "독케익"}},
+            }
+            engine.enrich_missing_sizes = lambda candidates, *args, **kwargs: candidates
+
+            result = engine.analyze_chzzk_clip("https://chzzk.naver.com/clips/z0DUTFaKDZ")
+
+            self.assertEqual(result["title"], "독케익 - Clip Title")
+            self.assertEqual(result["candidates"][0]["title"], "독케익 - Clip Title")
+            self.assertEqual(result["candidates"][0]["duration"], 15)
+        finally:
+            engine.chzzk_clip_detail = original_detail
+            engine.chzzk_shortform_card = original_card
+            engine.enrich_missing_sizes = original_enrich
+
+    def test_extract_chzzk_media_urls_reads_neonplayer_base_urls(self):
+        payload = {
+            "period": [
+                {
+                    "adaptationSet": [
+                        {
+                            "representation": [
+                                {
+                                    "width": 1920,
+                                    "height": 1080,
+                                    "bandwidth": 8202000,
+                                    "frameRate": "60",
+                                    "baseURL": [{"value": "https://cdn.example.test/video-1080.mp4"}],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+
+        mp4_candidates, hls_candidates = engine.extract_chzzk_media_urls(payload)
+
+        self.assertEqual(hls_candidates, [])
+        self.assertEqual(mp4_candidates[0]["url"], "https://cdn.example.test/video-1080.mp4")
+        self.assertEqual(mp4_candidates[0]["height"], 1080)
+        self.assertEqual(mp4_candidates[0]["width"], 1920)
+        self.assertEqual(mp4_candidates[0]["bandwidth"], 8202000)
+
+    def test_chzzk_display_title_keeps_channel_separator_when_title_starts_with_channel(self):
+        self.assertEqual(
+            engine.chzzk_display_title("독케익 퇴근각", "독케익"),
+            "독케익 - 퇴근각",
+        )
+
+    def test_chzzk_video_analysis_uses_neonplayer_playback(self):
+        original_detail = getattr(engine, "chzzk_video_detail", None)
+        original_playback = getattr(engine, "chzzk_video_playback", None)
+        original_enrich = engine.enrich_missing_sizes
+        try:
+            engine.chzzk_video_detail = lambda video_no: {
+                "content": {
+                    "videoNo": 13929299,
+                    "videoId": "video-id",
+                    "inKey": "in-key",
+                    "videoTitle": "Replay Title",
+                    "duration": 6632,
+                    "thumbnailImageUrl": "https://cdn.example.test/thumb.jpg",
+                    "vodStatus": "ABR_HLS",
+                    "channel": {"channelName": "독케익"},
+                }
+            }
+            engine.chzzk_video_playback = lambda video_id, in_key, video_no: {
+                "period": [
+                    {
+                        "adaptationSet": [
+                            {
+                                "representation": [
+                                    {
+                                        "width": 1920,
+                                        "height": 1080,
+                                        "bandwidth": 8202000,
+                                        "frameRate": "60",
+                                        "baseURL": [{"value": "https://cdn.example.test/replay.mp4"}],
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+            engine.enrich_missing_sizes = lambda candidates, *args, **kwargs: candidates
+
+            result = engine.analyze_chzzk_video("https://chzzk.naver.com/video/13929299")
+
+            self.assertEqual(result["title"], "독케익 - Replay Title")
+            self.assertEqual(result["candidates"][0]["title"], "독케익 - Replay Title")
+            self.assertEqual(result["candidates"][0]["duration"], 6632)
+            self.assertEqual(result["candidates"][0]["url"], "https://cdn.example.test/replay.mp4")
+            self.assertEqual(result["candidates"][0]["source"], "https://chzzk.naver.com/video/13929299")
+        finally:
+            if original_detail is None:
+                delattr(engine, "chzzk_video_detail")
+            else:
+                engine.chzzk_video_detail = original_detail
+            if original_playback is None:
+                delattr(engine, "chzzk_video_playback")
+            else:
+                engine.chzzk_video_playback = original_playback
+            engine.enrich_missing_sizes = original_enrich
+
+    def test_download_candidate_uses_direct_http_for_chzzk_mp4_candidates(self):
+        calls = []
+        original_direct = getattr(engine, "download_direct_media", None)
+
+        class FailingYDL:
+            def __init__(self, options):
+                raise AssertionError("yt-dlp should not run for CHZZK direct MP4 candidates")
+
+        def fake_direct(url, candidate, output_dir, on_event=None):
+            calls.append((url, candidate["title"], output_dir))
+            output_path = Path(output_dir) / "독케익 - Clip.mp4"
+            output_path.write_bytes(b"video")
+            return {"ok": True, "output_dir": output_dir, "output_path": str(output_path), "target_url": url}
+
+        try:
+            engine.download_direct_media = fake_direct
+            with tempfile.TemporaryDirectory() as temp:
+                result = engine.download_candidate(
+                    "https://chzzk.naver.com/clips/z0DUTFaKDZ",
+                    {
+                        "url": "https://cdn.example.test/clip.mp4",
+                        "source": "https://chzzk.naver.com/clips/z0DUTFaKDZ",
+                        "format_selector": "best",
+                        "title": "독케익 - Clip",
+                        "output_ext": "mp4",
+                        "ext": "mp4",
+                    },
+                    temp,
+                    ydl_factory=FailingYDL,
+                )
+
+            self.assertEqual(calls[0][0], "https://cdn.example.test/clip.mp4")
+            self.assertTrue(result["output_path"].endswith("독케익 - Clip.mp4"))
+        finally:
+            if original_direct is None:
+                delattr(engine, "download_direct_media")
+            else:
+                engine.download_direct_media = original_direct
 
     def test_error_classification_uses_required_public_labels(self):
         self.assertEqual(engine.classify_error("DRM encrypted stream"), "DRM 가능성")

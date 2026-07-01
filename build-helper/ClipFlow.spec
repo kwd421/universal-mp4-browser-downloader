@@ -23,11 +23,42 @@ datas = [
 ]
 binaries = []
 hiddenimports = []
+unused_large_modules = [
+    "PIL",
+    "Image",
+    "ImageTk",
+    "numpy",
+    "numpy.libs",
+    "PySide6.QtPdf",
+    "PySide6.QtPdfWidgets",
+    "PySide6.QtQml",
+    "PySide6.QtQmlModels",
+    "PySide6.QtQuick",
+    "PySide6.QtQuickWidgets",
+]
+unused_qt_binaries = [
+    "PySide6\\Qt6Pdf.dll",
+    "PySide6\\Qt6Qml.dll",
+    "PySide6\\Qt6QmlMeta.dll",
+    "PySide6\\Qt6QmlModels.dll",
+    "PySide6\\Qt6QmlWorkerScript.dll",
+    "PySide6\\Qt6Quick.dll",
+]
+
+
+def without_unused_binaries(toc):
+    filtered = []
+    for item in toc:
+        name = str(item[0]).replace("/", "\\").lower()
+        if any(name.endswith(binary.lower()) for binary in unused_qt_binaries):
+            continue
+        filtered.append(item)
+    return filtered
 
 hiddenimports += collect_submodules("yt_dlp")
 hiddenimports += ["PySide6.QtSvg", "tools.clipflow_analysis_process", "tools.clipflow_download_process", "tools.clipflow_qt"]
 
-for package in ("imageio_ffmpeg", "yt_dlp_ejs", "PIL", "curl_cffi"):
+for package in ("imageio_ffmpeg", "yt_dlp_ejs", "curl_cffi"):
     tmp_ret = collect_all(package)
     datas += tmp_ret[0]
     binaries += tmp_ret[1]
@@ -43,10 +74,12 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["electron"],
+    excludes=["electron", *unused_large_modules],
     noarchive=False,
     optimize=0,
 )
+a.binaries = without_unused_binaries(a.binaries)
+a.datas = without_unused_binaries(a.datas)
 pyz = PYZ(a.pure)
 
 if sys.platform == "darwin":

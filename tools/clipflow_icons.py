@@ -92,7 +92,7 @@ class LucideIconButton(QToolButton):
         self.setCursor(Qt.PointingHandCursor)
 
     def tooltip_position(self):
-        return self.mapToGlobal(QPoint(0, -self.sizeHint().height() - 10))
+        return self.mapToGlobal(QPoint(0, -self.sizeHint().height() - 2))
 
     def _icon_color(self):
         if not self.isEnabled():
@@ -235,7 +235,13 @@ def show_tooltip_above(widget, text):
     tip.adjustSize()
     origin = widget.mapToGlobal(QPoint(0, 0))
     x = origin.x() + (widget.width() - tip.width()) // 2
-    y = origin.y() - tip.height() - 8
+    y = origin.y() - tip.height() - 2
+    screen = widget.screen()
+    if screen is not None:
+        available = screen.availableGeometry()
+        x = max(available.left() + 4, min(x, available.right() - tip.width() - 4))
+        if y < available.top() + 4:
+            y = origin.y() + widget.height() + 2
     tip.move(x, y)
     tip.show()
     tip.raise_()

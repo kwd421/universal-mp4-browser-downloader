@@ -21,9 +21,14 @@ USER_AGENT = (
 )
 ACCEPT_LANGUAGE = "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
 CHZZK_CLIP_RE = re.compile(r"https?://chzzk\.naver\.com/clips/([A-Za-z0-9_-]+)")
+CHZZK_VIDEO_RE = re.compile(r"https?://chzzk\.naver\.com/video/(\d+)")
 GENERIC_TITLE_RE = re.compile(r"^(?:video(?:\s+\d+)?|post by .+)$", re.IGNORECASE)
 TRAILING_DOMAIN_TITLE_RE = re.compile(
     r"\s+(?:-|–|—|\|)\s+(?:www\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\s*$",
+    re.IGNORECASE,
+)
+ISO_DURATION_RE = re.compile(
+    r"^P(?:(?P<days>\d+(?:\.\d+)?)D)?(?:T(?:(?P<hours>\d+(?:\.\d+)?)H)?(?:(?P<minutes>\d+(?:\.\d+)?)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$",
     re.IGNORECASE,
 )
 VIDEO_EXTENSIONS = {"mp4", "m4v", "mov", "webm", "mkv", "flv", "ts"}
@@ -336,6 +341,48 @@ def remove_too_small_existing_output(candidate, output_dir, on_event=None):
     return True
 
 
+def convert_existing_media_to_audio(input_path, output_ext, output_dir=None, on_event=None, ffmpeg_exe=None, runner=None):
+    input_path = Path(input_path).expanduser()
+    if not input_path.is_file():
+        raise FileNotFoundError(f"Source file not found: {input_path}")
+
+    ext = normalized_output_ext(output_ext)
+    if ext not in AUDIO_OUTPUT_EXTENSIONS:
+        raise ValueError(f"Unsupported audio output extension: {output_ext}")
+
+    output_dir = Path(output_dir).expanduser() if output_dir else input_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{input_path.stem}.{ext}"
+    result = {"ok": True, "output_dir": str(output_dir), "output_path": str(output_path)}
+
+    if output_path == input_path or completed_output_exists(output_path, {"output_ext": ext}):
+        emit_event(on_event, "status", message=f"File already exists: {output_path.name}")
+        emit_event(on_event, "file", path=str(output_path))
+        emit_event(on_event, "done", path=str(output_path))
+        return result
+
+    ffmpeg_exe = ffmpeg_exe or ffmpeg_path() or shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        raise RuntimeError("ffmpeg is required for audio extraction")
+
+    command = [str(ffmpeg_exe), "-y", "-i", str(input_path), "-vn", str(output_path)]
+    emit_event(on_event, "status", message="Extracting audio")
+    completed = (runner or subprocess.run)(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "ffmpeg audio extraction failed").strip()
+        raise RuntimeError(message)
+
+    emit_event(on_event, "file", path=str(output_path))
+    emit_event(on_event, "done", path=str(output_path))
+    return result
+
+
 def escape_yt_dlp_template_literal(value):
     return str(value).replace("%", "%%")
 
@@ -344,9 +391,78 @@ def looks_like_playlist_url(url):
     parsed = urllib.parse.urlparse(str(url or ""))
     path = parsed.path.lower()
     query = urllib.parse.parse_qs(parsed.query)
+    if is_youtube_radio_watch_url(parsed, query):
+        return False
+    if is_youtube_short_video_url(parsed) and youtube_playlist_id(parsed, query).upper().startswith("RD"):
+        return False
     if any(str(value or "").strip() for value in query.get("list", [])):
         return True
     return "playlist" in path
+
+
+def is_youtube_short_video_url(url_or_parsed):
+    parsed = url_or_parsed if isinstance(url_or_parsed, urllib.parse.ParseResult) else urllib.parse.urlparse(str(url_or_parsed or ""))
+    host = parsed.netloc.lower().removeprefix("www.")
+    return host == "youtu.be" and bool(parsed.path.strip("/"))
+
+
+def youtube_video_id(url_or_parsed, query=None):
+    parsed = url_or_parsed if isinstance(url_or_parsed, urllib.parse.ParseResult) else urllib.parse.urlparse(str(url_or_parsed or ""))
+    host = parsed.netloc.lower().removeprefix("www.")
+    path = parsed.path.strip("/")
+    query = query if query is not None else urllib.parse.parse_qs(parsed.query)
+    if host == "youtu.be" and path:
+        return path.split("/", 1)[0]
+    if host in {"youtube.com", "m.youtube.com"} and parsed.path.lower() == "/watch":
+        return next((str(value or "").strip() for value in query.get("v", []) if str(value or "").strip()), "")
+    return ""
+
+
+def youtube_playlist_id(url_or_parsed, query=None):
+    parsed = url_or_parsed if isinstance(url_or_parsed, urllib.parse.ParseResult) else urllib.parse.urlparse(str(url_or_parsed or ""))
+    query = query if query is not None else urllib.parse.parse_qs(parsed.query)
+    return next((str(value or "").strip() for value in query.get("list", []) if str(value or "").strip()), "")
+
+
+def needs_youtube_playlist_choice(url):
+    parsed = urllib.parse.urlparse(str(url or ""))
+    query = urllib.parse.parse_qs(parsed.query)
+    return bool(youtube_video_id(parsed, query) and youtube_playlist_id(parsed, query))
+
+
+def youtube_single_video_url(url):
+    parsed = urllib.parse.urlparse(str(url or ""))
+    query = urllib.parse.parse_qs(parsed.query)
+    video_id = youtube_video_id(parsed, query)
+    if not video_id:
+        return str(url or "")
+    host = parsed.netloc.lower().removeprefix("www.")
+    if host == "youtu.be":
+        return urllib.parse.urlunparse((parsed.scheme or "https", "youtu.be", f"/{video_id}", "", "", ""))
+    return strip_playlist_query(url)
+
+
+def youtube_playlist_url(url):
+    parsed = urllib.parse.urlparse(str(url or ""))
+    query = urllib.parse.parse_qs(parsed.query)
+    playlist_id = youtube_playlist_id(parsed, query)
+    if not playlist_id:
+        return str(url or "")
+    return urllib.parse.urlunparse(("https", "www.youtube.com", "/playlist", "", urllib.parse.urlencode({"list": playlist_id}), ""))
+
+
+def is_youtube_radio_watch_url(url_or_parsed, query=None):
+    parsed = url_or_parsed if isinstance(url_or_parsed, urllib.parse.ParseResult) else urllib.parse.urlparse(str(url_or_parsed or ""))
+    host = parsed.netloc.lower().removeprefix("www.")
+    if host not in {"youtube.com", "m.youtube.com"}:
+        return False
+    if parsed.path.lower() != "/watch":
+        return False
+    query = query if query is not None else urllib.parse.parse_qs(parsed.query)
+    if not any(str(value or "").strip() for value in query.get("v", [])):
+        return False
+    list_id = next((str(value or "").strip() for value in query.get("list", []) if str(value or "").strip()), "")
+    return bool(query.get("start_radio")) or list_id.upper().startswith("RD")
 
 
 def playlist_identity_key(url):
@@ -502,6 +618,86 @@ def find_chzzk_clip_uid(*urls):
     return None
 
 
+def find_chzzk_video_no(*urls):
+    for url in urls:
+        if not url:
+            continue
+        match = CHZZK_VIDEO_RE.search(str(url))
+        if match:
+            return match.group(1)
+    return None
+
+
+def nested_value(value, *keys):
+    current = value
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def chzzk_channel_name(*payloads):
+    paths = [
+        ("channel", "channelName"),
+        ("ownerChannel", "channelName"),
+        ("makerChannel", "channelName"),
+        ("interaction", "subscription", "name"),
+        ("card", "interaction", "subscription", "name"),
+        ("subscription", "name"),
+    ]
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for path in paths:
+            name = clean_video_title(nested_value(payload, *path))
+            if name:
+                return name
+    return ""
+
+
+def chzzk_display_title(title, channel):
+    title = clean_video_title(title)
+    channel = clean_video_title(channel)
+    if not title or not channel:
+        return title or channel
+    title_folded = title.casefold()
+    channel_folded = channel.casefold()
+    if title_folded == channel_folded:
+        return channel
+    if title_folded.startswith(channel_folded):
+        remainder = title[len(channel):].lstrip(" \t-–—_:|")
+        if remainder:
+            return f"{channel} - {remainder}"
+    return f"{channel} - {title}"
+
+
+def seconds_from_duration_value(value):
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return max(0, int(float(text)))
+    match = ISO_DURATION_RE.match(text)
+    if not match:
+        return 0
+    days = float(match.group("days") or 0)
+    hours = float(match.group("hours") or 0)
+    minutes = float(match.group("minutes") or 0)
+    seconds = float(match.group("seconds") or 0)
+    return max(0, int(days * 86400 + hours * 3600 + minutes * 60 + seconds))
+
+
+def chzzk_duration(*values):
+    for value in values:
+        seconds = seconds_from_duration_value(value)
+        if seconds:
+            return seconds
+    return 0
+
+
 def http_json(url, params=None, headers=None):
     if params:
         url = f"{url}?{urllib.parse.urlencode(params, doseq=True)}"
@@ -537,6 +733,34 @@ def chzzk_clip_detail(clip_uid):
     )
 
 
+def chzzk_video_detail(video_no):
+    return http_json(
+        f"https://api.chzzk.naver.com/service/v3/videos/{video_no}",
+        headers={
+            "Referer": f"https://chzzk.naver.com/video/{video_no}",
+            "Origin": "https://chzzk.naver.com",
+            "Front-Client-Product-Type": "web",
+            "Front-Client-Platform-Type": "PC",
+        },
+    )
+
+
+def chzzk_video_playback(video_id, in_key, video_no):
+    return http_json(
+        f"https://apis.naver.com/neonplayer/vodplay/v1/playback/{video_id}",
+        params={
+            "key": in_key,
+            "env": "real",
+            "lc": "en_US",
+            "cpl": "en_US",
+        },
+        headers={
+            "Referer": f"https://chzzk.naver.com/video/{video_no}",
+            "Origin": "https://chzzk.naver.com",
+        },
+    )
+
+
 def chzzk_shortform_card(clip_uid, video_id, rec_id):
     return http_json(
         "https://api-videohub.naver.com/shortformhub/feeds/v9/card",
@@ -566,7 +790,17 @@ def extract_chzzk_media_urls(card_payload):
     mp4_candidates = []
     hls_candidates = []
 
-    def add_url(url, width=0, height=0, bandwidth=0):
+    def media_url(value):
+        if isinstance(value, dict):
+            for key in ("value", "url", "path", "#text"):
+                text = value.get(key)
+                if isinstance(text, str) and text.startswith("http"):
+                    return text
+            return ""
+        return value
+
+    def add_url(url, width=0, height=0, bandwidth=0, fps=0):
+        url = media_url(url)
         if not isinstance(url, str) or not url.startswith("http"):
             return
         item = {
@@ -574,6 +808,7 @@ def extract_chzzk_media_urls(card_payload):
             "width": safe_int(width),
             "height": safe_int(height),
             "bandwidth": safe_int(bandwidth),
+            "fps": safe_int(fps),
         }
         lower = url.lower()
         if ".mp4" in lower:
@@ -583,13 +818,21 @@ def extract_chzzk_media_urls(card_payload):
 
     def walk(value):
         if isinstance(value, dict):
-            base_urls = value.get("BaseURL")
-            if isinstance(base_urls, list):
-                for base_url in base_urls:
-                    add_url(base_url, value.get("@width"), value.get("@height"), value.get("@bandwidth"))
+            width = value.get("@width") or value.get("width")
+            height = value.get("@height") or value.get("height")
+            bandwidth = value.get("@bandwidth") or value.get("bandwidth")
+            fps = value.get("@frameRate") or value.get("frameRate") or value.get("fps")
+            for base_key in ("BaseURL", "baseURL"):
+                base_urls = value.get(base_key)
+                if isinstance(base_urls, list):
+                    for base_url in base_urls:
+                        add_url(base_url, width, height, bandwidth, fps)
+                else:
+                    add_url(base_urls, width, height, bandwidth, fps)
             bitrate = value.get("bitrate") if isinstance(value.get("bitrate"), dict) else {}
-            add_url(value.get("@nvod:m3u"), value.get("@width"), value.get("@height"), value.get("@bandwidth"))
-            add_url(value.get("source"), value.get("width"), value.get("height"), bitrate.get("video"))
+            add_url(value.get("@nvod:m3u"), width, height, bandwidth, fps)
+            add_url(value.get("source"), width, height, bitrate.get("video") or bandwidth, fps)
+            add_url(value.get("path"), width, height, bandwidth, fps)
             for child in value.values():
                 walk(child)
         elif isinstance(value, list):
@@ -603,6 +846,39 @@ def extract_chzzk_media_urls(card_payload):
         return sorted(deduped.values(), key=lambda item: (item["height"], item["width"], item["bandwidth"]), reverse=True)
 
     return best(mp4_candidates), best(hls_candidates)
+
+
+def chzzk_candidates_from_media(media_items, source_url, title, thumbnail, duration):
+    candidates = []
+    for index, item in enumerate(media_items, start=1):
+        url = str(item.get("url") or "")
+        ext = "mp4" if ".mp4" in url.lower() else "m3u8"
+        candidates.append(
+            {
+                "id": f"chzzk-{index}",
+                "format_id": f"chzzk-{item.get('height') or index}",
+                "format_selector": "best",
+                "url": url,
+                "title": title,
+                "display_title": title,
+                "thumbnail": thumbnail,
+                "duration": duration,
+                "ext": ext,
+                "output_ext": "mp4",
+                "resolution": f"{item.get('width')}x{item.get('height')}" if item.get("width") and item.get("height") else (f"{item.get('height')}p" if item.get("height") else "unknown"),
+                "height": safe_int(item.get("height")),
+                "fps": safe_int(item.get("fps")),
+                "vcodec": "unknown",
+                "acodec": "unknown",
+                "filesize": 0,
+                "filesize_approx": 0,
+                "sort_bytes": 0,
+                "size_source": "unknown",
+                "source": source_url,
+                "note": "CHZZK direct MP4" if ext == "mp4" else "CHZZK HLS",
+            }
+        )
+    return candidates
 
 
 def analyze_chzzk_clip(url, on_event=None):
@@ -622,8 +898,13 @@ def analyze_chzzk_clip(url, on_event=None):
 
     card = chzzk_shortform_card(clip_uid, video_id, content.get("recId"))
     mp4_candidates, hls_candidates = extract_chzzk_media_urls(card)
-    candidates = []
-    title = content.get("clipTitle") or content.get("title") or f"CHZZK clip {clip_uid}"
+    raw_title = content.get("clipTitle") or content.get("title") or f"CHZZK clip {clip_uid}"
+    title = chzzk_display_title(raw_title, chzzk_channel_name(content, card))
+    duration = chzzk_duration(
+        content.get("duration"),
+        content.get("durationSeconds"),
+        content.get("playTime"),
+    )
     thumbnail = (
         content.get("thumbnailImageUrl")
         or content.get("clipImageUrl")
@@ -631,37 +912,50 @@ def analyze_chzzk_clip(url, on_event=None):
         or content.get("previewImageUrl")
         or ""
     )
-    for index, item in enumerate(mp4_candidates + hls_candidates, start=1):
-        ext = "mp4" if ".mp4" in item["url"].lower() else "m3u8"
-        candidates.append(
-            {
-                "id": f"chzzk-{index}",
-                "format_id": f"chzzk-{item['height'] or index}",
-                "format_selector": "best",
-                "url": item["url"],
-                "title": title,
-                "display_title": title,
-                "thumbnail": thumbnail,
-                "duration": 0,
-                "ext": ext,
-                "resolution": f"{item['width']}x{item['height']}" if item["width"] and item["height"] else (f"{item['height']}p" if item["height"] else "unknown"),
-                "height": item["height"],
-                "fps": 0,
-                "vcodec": "unknown",
-                "acodec": "unknown",
-                "filesize": 0,
-                "filesize_approx": 0,
-                "sort_bytes": 0,
-                "size_source": "unknown",
-                "source": f"https://chzzk.naver.com/clips/{clip_uid}",
-                "note": "CHZZK direct MP4" if ext == "mp4" else "CHZZK HLS",
-            }
-        )
+    source_url = f"https://chzzk.naver.com/clips/{clip_uid}"
+    candidates = chzzk_candidates_from_media(mp4_candidates + hls_candidates, source_url, title, thumbnail, duration)
     candidates = sort_candidates(enrich_missing_sizes(candidates))
     return {
         "url": url,
-        "webpage_url": f"https://chzzk.naver.com/clips/{clip_uid}",
+        "webpage_url": source_url,
         "title": candidates[0]["title"] if candidates else f"CHZZK clip {clip_uid}",
+        "candidates": candidates,
+        "warnings": [],
+    }
+
+
+def analyze_chzzk_video(url, on_event=None):
+    video_no = find_chzzk_video_no(url)
+    if not video_no:
+        return None
+
+    emit_event(on_event, "status", message=f"CHZZK 동영상 분석 중: {video_no}")
+    detail = chzzk_video_detail(video_no)
+    content = detail.get("content") or {}
+    if content.get("adult") or content.get("blindType"):
+        raise RuntimeError("CHZZK video is not publicly playable in this session.")
+
+    raw_title = content.get("videoTitle") or content.get("title") or f"CHZZK video {video_no}"
+    title = chzzk_display_title(raw_title, chzzk_channel_name(content))
+    duration = chzzk_duration(content.get("duration"))
+    thumbnail = content.get("thumbnailImageUrl") or content.get("imageUrl") or ""
+    source_url = f"https://chzzk.naver.com/video/{video_no}"
+
+    playback = None
+    if content.get("videoId") and content.get("inKey"):
+        playback = chzzk_video_playback(content.get("videoId"), content.get("inKey"), video_no)
+    elif content.get("liveRewindPlaybackJson"):
+        playback = json.loads(content.get("liveRewindPlaybackJson") or "{}")
+    if not playback:
+        raise RuntimeError("CHZZK video playback information was not available.")
+
+    mp4_candidates, hls_candidates = extract_chzzk_media_urls(playback)
+    candidates = chzzk_candidates_from_media(mp4_candidates + hls_candidates, source_url, title, thumbnail, duration)
+    candidates = sort_candidates(enrich_missing_sizes(candidates))
+    return {
+        "url": url,
+        "webpage_url": source_url,
+        "title": candidates[0]["title"] if candidates else title,
         "candidates": candidates,
         "warnings": [],
     }
@@ -1721,11 +2015,15 @@ def analyze_url(
     chzzk = analyze_chzzk_clip(url, on_event=on_event)
     if chzzk:
         return chzzk
+    chzzk = analyze_chzzk_video(url, on_event=on_event)
+    if chzzk:
+        return chzzk
 
     if ydl_factory is None:
         ydl_factory = youtube_dl_factory()
 
     allow_playlist = looks_like_playlist_url(url) and not _force_single
+    analysis_url = strip_playlist_query(url) if is_youtube_radio_watch_url(url) else url
 
     if allow_playlist:
         progressive = analyze_playlist_progressively(
@@ -1753,13 +2051,13 @@ def analyze_url(
         options.update({"simulate": True, "skip_download": True, "check_formats": False})
         emit_event(on_event, "status", message="URL 분석 중")
         with ydl_factory(options) as ydl:
-            return ydl.extract_info(url, download=False)
+            return ydl.extract_info(analysis_url, download=False)
 
     def try_browser_dom_fallback(reason):
         try:
             fetcher = browser_dom_fetcher or dump_dom_with_browser
-            dom = fetcher(url, on_event=on_event)
-            result = analyze_browser_dom_media(url, dom, output_ext=output_ext, on_event=on_event)
+            dom = fetcher(analysis_url, on_event=on_event)
+            result = analyze_browser_dom_media(analysis_url, dom, output_ext=output_ext, on_event=on_event)
             warning = "브라우저 DOM fallback 사용: " + str(reason)
             result["warnings"] = [*warnings, warning, *(result.get("warnings") or [])]
             emit_event(on_event, "log", message=warning)
@@ -1836,10 +2134,67 @@ def analyze_url(
     return result
 
 
-def download_candidate(page_url, candidate, output_dir, cookie_source="없음", ydl_factory=None, on_event=None, proxy_url=None):
-    if ydl_factory is None:
-        ydl_factory = youtube_dl_factory()
+def is_chzzk_direct_mp4_candidate(candidate):
+    source = str((candidate or {}).get("source") or "")
+    media_url = str((candidate or {}).get("url") or "")
+    return (
+        "chzzk.naver.com/" in source
+        and media_url.lower().startswith(("http://", "https://"))
+        and ".mp4" in media_url.lower()
+        and str((candidate or {}).get("format_selector") or "") == "best"
+    )
 
+
+def download_direct_media(url, candidate, output_dir, on_event=None):
+    output_dir = Path(output_dir).expanduser()
+    output_path = final_output_path_for_candidate(candidate, output_dir)
+    if output_path is None:
+        raise RuntimeError("Direct media output path could not be determined.")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    part_path = output_path.with_name(output_path.name + ".part")
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": ACCEPT_LANGUAGE,
+    }
+    source = str((candidate or {}).get("source") or "")
+    if source.startswith(("http://", "https://")):
+        headers["Referer"] = source
+    request = urllib.request.Request(url, headers=headers)
+    emit_event(on_event, "status", message="Starting direct download")
+    downloaded = 0
+    last_progress = 0.0
+    with urllib.request.urlopen(request, timeout=30) as response, part_path.open("wb") as file:
+        total = safe_int(response.headers.get("Content-Length"))
+        while True:
+            chunk = response.read(1024 * 256)
+            if not chunk:
+                break
+            file.write(chunk)
+            downloaded += len(chunk)
+            now = time.monotonic()
+            if total and (now - last_progress >= 0.25 or downloaded >= total):
+                last_progress = now
+                percent = max(0, min(100, downloaded * 100 / total))
+                emit_event(
+                    on_event,
+                    "progress",
+                    percent=percent,
+                    downloaded=downloaded,
+                    total=total,
+                    message=f"{percent:.1f}%",
+                )
+    part_path.replace(output_path)
+    emit_event(on_event, "file", path=str(output_path))
+    emit_event(on_event, "done", path=str(output_dir))
+    return {
+        "ok": True,
+        "output_dir": str(output_dir),
+        "output_path": str(output_path),
+        "target_url": url,
+    }
+
+
+def download_candidate(page_url, candidate, output_dir, cookie_source="없음", ydl_factory=None, on_event=None, proxy_url=None):
     existing_output_path = existing_output_path_for_candidate(candidate, output_dir)
     if existing_output_path:
         emit_event(on_event, "status", message=f"File already exists: {existing_output_path.name}")
@@ -1855,6 +2210,11 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
     target_url = candidate.get("source") or page_url or candidate.get("url")
     if candidate.get("format_selector") == "best" and candidate.get("url"):
         target_url = candidate["url"]
+    if is_chzzk_direct_mp4_candidate(candidate):
+        return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
+
+    if ydl_factory is None:
+        ydl_factory = youtube_dl_factory()
     options = build_download_options(candidate, output_dir, cookie_source=cookie_source, on_event=on_event, proxy_url=proxy_url)
     emit_event(on_event, "status", message="Starting download")
     try:
@@ -1917,6 +2277,7 @@ _ANALYSIS_PROCESS_POOL_LOCK = threading.Lock()
 
 def _download_worker_request(page_url, candidate, output_dir, cookie_source="없음", proxy_url=None):
     return {
+        "request_id": str((candidate or {}).get("_clipflow_row_id") or ""),
         "page_url": page_url,
         "candidate": candidate or {},
         "output_dir": str(output_dir),
@@ -2078,6 +2439,7 @@ class DownloadProcessPool:
         self.max_idle = max_idle
         self.command_factory = command_factory or persistent_download_worker_command
         self._idle = []
+        self._active = {}
         self._lock = threading.Lock()
         self._trim_timer = None
 
@@ -2124,13 +2486,18 @@ class DownloadProcessPool:
             self._schedule_trim_locked()
 
     def run(self, request, on_event=None):
+        request_id = str((request or {}).get("request_id") or "")
         with self._lock:
             self._trim_locked()
             worker = self._idle.pop() if self._idle else self._new_process()
+            if request_id:
+                self._active[request_id] = worker
         try:
             return worker.run(request, on_event=on_event)
         finally:
             with self._lock:
+                if request_id and self._active.get(request_id) is worker:
+                    self._active.pop(request_id, None)
                 if worker.is_alive():
                     self._idle.append(worker)
                     self._trim_locked()
@@ -2138,13 +2505,25 @@ class DownloadProcessPool:
                 else:
                     worker.close()
 
+    def cancel(self, request_id):
+        request_id = str(request_id or "")
+        if not request_id:
+            return False
+        with self._lock:
+            worker = self._active.pop(request_id, None)
+        if not worker:
+            return False
+        worker.close()
+        return True
+
     def close_all(self):
         with self._lock:
             if self._trim_timer:
                 self._trim_timer.cancel()
                 self._trim_timer = None
-            workers = list(self._idle)
+            workers = list(self._idle) + list(self._active.values())
             self._idle = []
+            self._active = {}
         for worker in workers:
             worker.close()
 
@@ -2339,6 +2718,10 @@ def download_process_pool():
 
 def warm_download_worker():
     download_process_pool().warm()
+
+
+def cancel_download_request(request_id):
+    return download_process_pool().cancel(request_id)
 
 
 def analysis_process_pool():

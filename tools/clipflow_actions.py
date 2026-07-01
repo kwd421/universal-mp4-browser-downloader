@@ -23,9 +23,11 @@ from PySide6.QtWidgets import (
 try:
     from tools import downloader_engine as engine
     from tools.clipflow_dialogs import DeleteConfirmDialog
+    from tools.clipflow_theme import DOWNLOAD_STATUS, PAUSED_STATUS
 except ImportError:
     import downloader_engine as engine
     from clipflow_dialogs import DeleteConfirmDialog
+    from clipflow_theme import DOWNLOAD_STATUS, PAUSED_STATUS
 
 
 def local_file_url(path):
@@ -85,7 +87,7 @@ class ActionMixin:
         return QDesktopServices.openUrl(local_file_url(path))
 
     def remove_row(self, row):
-        if row.get("status") in {"분석 중", "다운로드 중"}:
+        if row.get("status") in {"분석 중", DOWNLOAD_STATUS}:
             return
         if row in self.rows:
             index = self.rows.index(row)
@@ -139,7 +141,7 @@ class ActionMixin:
         removable = [
             row
             for row in self.rows
-            if row.get("checked") and row.get("status") not in {"분석 중", "다운로드 중"}
+            if row.get("checked") and row.get("status") not in {"분석 중", DOWNLOAD_STATUS}
         ]
         if not removable:
             self._set_status("선택된 항목이 없습니다")
@@ -148,12 +150,7 @@ class ActionMixin:
             return
         if delete_files:
             for row in removable:
-                output_path = Path(row.get("output_path") or "")
-                if output_path.exists() and output_path.is_file():
-                    try:
-                        output_path.unlink()
-                    except OSError:
-                        pass
+                self._delete_paths_for_row(row)
         keep = [row for row in self.rows if row not in removable]
         self.rows = keep
         if self.selected_row_index >= len(self.rows):
@@ -197,27 +194,26 @@ class ActionMixin:
         return dialog.exec() == QDialog.Accepted
 
     def delete_file_for_row(self, row):
-        if row.get("status") == "다운로드 중":
+        if row.get("status") == DOWNLOAD_STATUS:
             return
         output_path = self._delete_target_for_row(row)
-        if output_path is None:
+        delete_paths = self._delete_paths_for_row(row, dry_run=True)
+        if output_path is None and not delete_paths:
             return
-        if not output_path.exists():
-            return
+        confirm_target = output_path or (delete_paths[0] if delete_paths else None)
         confirmed = (
-            self.confirm_delete_func(output_path)
+            self.confirm_delete_func(confirm_target)
             if self.confirm_delete_func
-            else self._confirm_file_delete(output_path, row)
+            else self._confirm_file_delete(confirm_target, row)
         )
         if not confirmed:
             return
         try:
             if row.get("kind") == "playlist":
+                output_path = output_path or engine.output_dir_for_candidate(row.get("candidate") or {}, self.folder_input.text())
                 self._delete_playlist_output_files(row, output_path)
-            elif output_path.is_dir():
-                output_path.rmdir()
             else:
-                output_path.unlink()
+                self._delete_paths_for_row(row)
         except OSError as exc:
             QMessageBox.warning(self, "파일 삭제 실패", str(exc))
             return
@@ -232,6 +228,55 @@ class ActionMixin:
             return Path(saved_output)
         candidate = self.selected_candidate_for_row_ref(row) or row.get("candidate") or {}
         return self._existing_output_path_for_row(row, candidate)
+
+    def _delete_paths_for_row(self, row, dry_run=False):
+        paths = self._download_output_paths_for_row(row)
+        if dry_run:
+            return [path for path in paths if path.exists()]
+        deleted = []
+        for path in paths:
+            if not path.exists():
+                continue
+            if path.is_dir():
+                try:
+                    path.rmdir()
+                    deleted.append(path)
+                except OSError:
+                    pass
+                continue
+            try:
+                path.unlink()
+                deleted.append(path)
+            except OSError:
+                pass
+        return deleted
+
+    def _download_output_paths_for_row(self, row):
+        if row.get("kind") == "playlist":
+            playlist_dir = engine.output_dir_for_candidate(row.get("candidate") or {}, self.folder_input.text())
+            paths = []
+            for child in self._playlist_children_for_parent(row):
+                paths.extend(self._download_output_paths_for_row(child))
+            paths.append(playlist_dir)
+            return list(dict.fromkeys(paths))
+
+        candidate = self.selected_candidate_for_row_ref(row) or row.get("candidate") or {}
+        output_dir = self._output_dir_for_row(row, candidate) if hasattr(self, "_output_dir_for_row") else engine.output_dir_for_candidate(candidate, self.folder_input.text())
+        output_dir = Path(output_dir).expanduser()
+        paths = []
+        saved_output = row.get("output_path") or ""
+        if saved_output:
+            paths.append(Path(saved_output).expanduser())
+        final_path = engine.final_output_path_for_candidate(candidate, output_dir)
+        if final_path:
+            paths.append(Path(final_path).expanduser())
+            if output_dir.exists():
+                final_name = final_path.name
+                try:
+                    paths.extend(path for path in output_dir.iterdir() if path.name.startswith(final_name))
+                except OSError:
+                    pass
+        return list(dict.fromkeys(paths))
 
     def _remove_rows_after_file_delete(self, row):
         if row.get("kind") == "playlist":

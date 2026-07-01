@@ -44,7 +44,10 @@ except ImportError:
 
 
 ANALYZING_STATUS = "분석 중"
-ACTIVE_STATUSES = {ANALYZING_STATUS, "다운로드 중"}
+DOWNLOAD_STATUS = "다운로드 중"
+WAITING_STATUS = "대기"
+PAUSED_STATUS = "일시정지"
+ACTIVE_STATUSES = {ANALYZING_STATUS, DOWNLOAD_STATUS}
 COMPLETED_STATUS = "완료"
 ERROR_STATUS = "오류"
 ROW_BORDER_WIDTH = 1
@@ -324,6 +327,24 @@ class DownloadRowWidget(QFrame):
         actions.setSpacing(ACTION_SPACING)
         actions.setAlignment(Qt.AlignCenter)
 
+        self.pause_download_button = LucideIconButton(
+            "pause",
+            size=ACTION_BUTTON_SIZE,
+            icon_size=ACTION_ICON_SIZE,
+        )
+        self.pause_download_button.setToolTip("일시정지")
+        self.pause_download_button.clicked.connect(self._pause_download)
+        actions.addWidget(self.pause_download_button)
+
+        self.resume_download_button = LucideIconButton(
+            "play",
+            size=ACTION_BUTTON_SIZE,
+            icon_size=ACTION_ICON_SIZE,
+        )
+        self.resume_download_button.setToolTip("재시작")
+        self.resume_download_button.clicked.connect(self._resume_download)
+        actions.addWidget(self.resume_download_button)
+
         self.open_folder_button = LucideIconButton(
             "folder",
             size=ACTION_BUTTON_SIZE,
@@ -413,20 +434,27 @@ class DownloadRowWidget(QFrame):
         self.source_link_button.set_source_url(source_url)
 
     def _refresh_actions(self):
-        active = self.row.get("status") in ACTIVE_STATUSES
+        status = self.row.get("status")
+        active = status in ACTIVE_STATUSES
+        pauseable = status in {DOWNLOAD_STATUS, WAITING_STATUS}
+        paused = status == PAUSED_STATUS
         completed = self.row.get("status") == COMPLETED_STATUS
         output_path = Path(self.row.get("output_path") or "")
         has_output = bool(self.row.get("output_path")) and output_path.exists()
-        can_resolve_output = bool(has_output or self.row.get("kind") == "playlist" or self.row.get("is_playlist_child"))
+        can_resolve_output = bool(has_output or paused or self.row.get("kind") == "playlist" or self.row.get("is_playlist_child"))
         # Finder + file delete only make sense once a file exists (completed).
         # Analysed / error rows expose only "remove from list".
+        self.pause_download_button.setVisible(pauseable)
+        self.resume_download_button.setVisible(paused)
         self.open_folder_button.setVisible(completed)
-        self.delete_file_button.setVisible(completed)
+        self.delete_file_button.setVisible(completed or paused)
         self.more_button.setVisible(completed)
-        self.remove_button.setVisible(not active)
+        self.remove_button.setVisible(not active and not paused)
+        self.pause_download_button.setEnabled(pauseable)
+        self.resume_download_button.setEnabled(paused)
         self.open_folder_button.setEnabled(completed and not active)
         self.remove_button.setEnabled(not active)
-        self.delete_file_button.setEnabled(completed and can_resolve_output and not active)
+        self.delete_file_button.setEnabled((completed or paused) and can_resolve_output and not active)
         self.more_button.setEnabled(completed)
 
     def _playlist_detail_text(self):
@@ -476,7 +504,7 @@ class DownloadRowWidget(QFrame):
         self.setProperty("hovered", "true" if visual_hovered else "false")
         active = self.row.get("status") in ACTIVE_STATUSES
         analyzing = bool(self.row.get("analysis_loading")) or self.row.get("status") == ANALYZING_STATUS
-        show_actions = visual_hovered and (not active or self.row.get("kind") == "playlist") and not analyzing
+        show_actions = visual_hovered and not analyzing
         self.actions_widget.setVisible(show_actions)
         action_width = ACTION_STRIP_WIDTH
         self.title_action_spacer.setFixedWidth(action_width + ROW_INSET)
@@ -523,6 +551,12 @@ class DownloadRowWidget(QFrame):
 
     def _remove_row(self):
         self.owner.remove_row(self.row)
+
+    def _pause_download(self):
+        self.owner.pause_download_for_row(self.row)
+
+    def _resume_download(self):
+        self.owner.resume_download_for_row(self.row)
 
     def _delete_file(self):
         self.owner.delete_file_for_row(self.row)
