@@ -53,6 +53,10 @@ COOKIE_SOURCES = {
     "whale": ("whale",),
     "chromium": ("chromium",),
 }
+
+
+class DirectMediaRangeUnsupported(RuntimeError):
+    pass
 _YOUTUBE_DL_FACTORY = None
 _FFMPEG_PATH_UNSET = object()
 _FFMPEG_PATH = _FFMPEG_PATH_UNSET
@@ -2248,7 +2252,7 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
         written = 0
         with urllib.request.urlopen(request, timeout=30) as response, segment_path.open("wb") as file:
             if safe_int(getattr(response, "status", 206)) != 206:
-                raise RuntimeError("Direct media range request was not honored.")
+                raise DirectMediaRangeUnsupported("Direct media range request was not honored.")
             while True:
                 chunk = response.read(1024 * 512)
                 if not chunk:
@@ -2290,7 +2294,11 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
     use_parallel = total >= DIRECT_MEDIA_PARALLEL_THRESHOLD
     emit_event(on_event, "status", message="Starting parallel direct download" if use_parallel else "Starting direct download")
     if use_parallel:
-        part_path = download_direct_media_parallel(url, output_path, headers, total, on_event=on_event)
+        try:
+            part_path = download_direct_media_parallel(url, output_path, headers, total, on_event=on_event)
+        except DirectMediaRangeUnsupported:
+            emit_event(on_event, "status", message="Range download unsupported; retrying direct download")
+            part_path = download_direct_media_single(url, output_path, headers, total=total, on_event=on_event)
     else:
         part_path = download_direct_media_single(url, output_path, headers, total=total, on_event=on_event)
     part_path.replace(output_path)

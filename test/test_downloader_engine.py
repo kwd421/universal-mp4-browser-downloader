@@ -1624,15 +1624,19 @@ for line in sys.stdin:
         self.assertTrue(all(value.startswith("bytes=") for value in ranges))
         self.assertTrue(any(event.get("type") == "progress" and event.get("speed_text") for event in events))
 
-    def test_parallel_direct_media_rejects_ignored_range_request(self):
+    def test_parallel_direct_media_falls_back_when_range_request_is_ignored(self):
         content = b"x" * (512 * 1024)
+        events = []
         original_urlopen = engine.urllib.request.urlopen
         original_threshold = engine.DIRECT_MEDIA_PARALLEL_THRESHOLD
         original_part_size = engine.DIRECT_MEDIA_PARALLEL_PART_SIZE
 
         class FakeResponse:
-            status = 200
-            headers = {"Content-Length": str(len(content))}
+            def __init__(self, payload, status):
+                self.payload = payload
+                self.status = status
+                self.headers = {"Content-Length": str(len(payload))}
+                self.offset = 0
 
             def __enter__(self):
                 return self
@@ -1641,30 +1645,47 @@ for line in sys.stdin:
                 return False
 
             def read(self, size):
-                del size
-                return b""
+                if self.offset >= len(self.payload):
+                    return b""
+                chunk = self.payload[self.offset : self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+
+        def fake_urlopen(request, timeout=30):
+            del timeout
+            if request.get_header("Range"):
+                return FakeResponse(b"", 200)
+            return FakeResponse(content, 200)
 
         try:
-            engine.urllib.request.urlopen = lambda request, timeout=30: FakeResponse()
+            engine.urllib.request.urlopen = fake_urlopen
             engine.DIRECT_MEDIA_PARALLEL_THRESHOLD = 1
             engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = 256 * 1024
             with tempfile.TemporaryDirectory() as temp:
-                with self.assertRaisesRegex(RuntimeError, "range request was not honored"):
-                    engine.download_direct_media(
-                        "https://cdn.example.test/video.mp4",
-                        {
-                            "title": "Video",
-                            "output_ext": "mp4",
-                            "ext": "mp4",
-                            "sort_bytes": len(content),
-                            "source": "https://chzzk.naver.com/video/1",
-                        },
-                        temp,
-                    )
+                result = engine.download_direct_media(
+                    "https://cdn.example.test/video.mp4",
+                    {
+                        "title": "Video",
+                        "output_ext": "mp4",
+                        "ext": "mp4",
+                        "sort_bytes": len(content),
+                        "source": "https://chzzk.naver.com/video/1",
+                    },
+                    temp,
+                    on_event=events.append,
+                )
+                self.assertEqual(Path(result["output_path"]).read_bytes(), content)
         finally:
             engine.urllib.request.urlopen = original_urlopen
             engine.DIRECT_MEDIA_PARALLEL_THRESHOLD = original_threshold
             engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = original_part_size
+
+        self.assertTrue(
+            any(
+                event.get("type") == "status" and "retrying direct download" in event.get("message", "")
+                for event in events
+            )
+        )
 
     def test_error_classification_uses_required_public_labels(self):
         self.assertEqual(engine.classify_error("DRM encrypted stream"), "DRM 가능성")
