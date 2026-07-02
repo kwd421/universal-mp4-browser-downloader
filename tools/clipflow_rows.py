@@ -563,6 +563,9 @@ class DownloadRowWidget(QFrame):
 
     def _show_more_menu(self):
         menu = QMenu(self)
+        if self.row.get("kind") != "playlist" or self.row.get("is_playlist_child"):
+            segment_action = menu.addAction("구간 다운로드...")
+            segment_action.triggered.connect(lambda _checked=False: self.owner.download_segment_for_row(self.row))
         for label, fmt in (("음원 추출 (WAV)", "WAV"), ("음원 추출 (MP3)", "MP3")):
             action = menu.addAction(label)
             action.triggered.connect(lambda _checked=False, f=fmt: self.owner.extract_audio_for_row(self.row, f))

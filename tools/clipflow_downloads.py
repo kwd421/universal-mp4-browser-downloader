@@ -117,6 +117,13 @@ class DownloadMixin:
     def start_download_for_row(self, row):
         if row not in self.rows:
             return
+        row_has_own_clip_range = bool(row.get("fixed_candidate") and (row.get("candidate") or {}).get("clip_range"))
+        if hasattr(self, "current_clip_range") and not row_has_own_clip_range:
+            try:
+                self.current_clip_range()
+            except ValueError as exc:
+                self._set_status(str(exc))
+                return
         if row.get("kind") == "playlist":
             self._start_playlist_children_downloads(row)
             return
@@ -241,7 +248,15 @@ class DownloadMixin:
         candidate = candidate or self.selected_candidate_for_row_ref(row)
         if not candidate:
             return
-        download_candidate = self._candidate_for_download(row, candidate) if hasattr(self, "_candidate_for_download") else candidate
+        try:
+            download_candidate = self._candidate_for_download(row, candidate) if hasattr(self, "_candidate_for_download") else candidate
+        except ValueError as exc:
+            self._set_status(str(exc))
+            widget = row.get("widget")
+            if widget:
+                widget.set_status(READY_STATUS)
+                widget.set_progress(0, "")
+            return
         download_candidate["_clipflow_row_id"] = str(row.get("id") or "")
         self.primary_button.set_loading(False)
         self.selected_row_index = self.rows.index(row)

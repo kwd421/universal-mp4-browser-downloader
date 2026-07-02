@@ -245,9 +245,14 @@ class SettingsMixin:
             if row.get("status") != COMPLETED_STATUS and not include_playlist_parent:
                 continue
             candidate = row.get("candidate") or {}
+            candidate_payload = self._json_ready(candidate)
+            media_url = str(candidate_payload.get("url") or "")
+            source_url = str(candidate_payload.get("source") or row.get("source_url") or "")
+            if "chzzk.naver.com/" in source_url and media_url.startswith(("http://", "https://")) and "chzzk.naver.com/" not in media_url:
+                candidate_payload.pop("url", None)
             payload.append(
                 {
-                    "candidate": self._json_ready(candidate),
+                    "candidate": candidate_payload,
                     "source_url": row.get("source_url") or "",
                     "analysis_source_url": row.get("analysis_source_url") or "",
                     "playlist_key": self._playlist_group_key_for_row(row) if row.get("kind") == "playlist" else row.get("playlist_key") or "",

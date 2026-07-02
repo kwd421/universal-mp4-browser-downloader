@@ -349,6 +349,7 @@ labels = [label.text() for label in popup.findChildren(QLabel)]
 print(bool(popup and popup.isVisible()))
 print(len(combos))
 print(window.preference_button.text())
+print("병렬" in window.preference_button.toolTip())
 print("병렬" in labels)
 print("프레임" in labels)
 print(all(combo.toolTip() for combo in combos))
@@ -371,7 +372,7 @@ print(window.preferences_popup is None)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["True", "4", "옵션", "True", "False", "True", "True", "3", "True", "720p", "WEBM", "2", "True"],
+            ["True", "4", "옵션", "True", "True", "False", "True", "True", "3", "True", "720p", "WEBM", "2", "True"],
         )
 
     def test_clipflow_qt_audio_format_disables_codec_and_frame_preferences(self):
@@ -1867,18 +1868,26 @@ window.resize(1500, 1100)
 window.show()
 app.processEvents()
 
-field_boxes = window.findChildren(QFrame, "FieldBox")
-folder_box = field_boxes[1]
+folder_box = window.folder_input.parent()
+url_box = window.url_input.parent()
+segment_button = window.clip_range_button
 folder_top = folder_box.mapTo(window, QPoint(0, 0)).y()
 cookie_top = window.cookie_combo.mapTo(window, QPoint(0, 0)).y()
+segment_top = segment_button.mapTo(window, QPoint(0, 0)).y()
+primary_top = window.primary_button.mapTo(window, QPoint(0, 0)).y()
 primary_right = window.primary_button.mapTo(window, QPoint(0, 0)).x() + window.primary_button.width()
 cookie_right = window.cookie_combo.mapTo(window, QPoint(0, 0)).x() + window.cookie_combo.width()
 
 print(folder_box.height())
 print(window.cookie_combo.height())
 print(window.folder_button.text())
+print(url_box.width() >= folder_box.width())
 print(abs(folder_top - cookie_top) <= 1)
+print(abs(segment_top - primary_top) <= 1)
 print(abs(primary_right - cookie_right) <= 1)
+print(segment_button.text())
+print(segment_button.width())
+print(hasattr(window, "clip_range_panel"))
 print(window.primary_button.width())
 print(hasattr(window, "cookie_help_button"))
 '''
@@ -1887,7 +1896,7 @@ print(hasattr(window, "cookie_help_button"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["42", "42", "저장 위치", "True", "True", "64", "False"],
+            ["42", "42", "저장 위치", "True", "True", "True", "True", "구간선택", "96", "False", "64", "False"],
         )
 
     def test_clipflow_qt_folder_path_is_editable_and_persisted_on_enter(self):
@@ -4459,6 +4468,345 @@ print("_download_info" in row["candidate"])
             ],
         )
 
+    def test_clipflow_qt_top_clip_inputs_attach_range_only_when_set(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+print(window.clip_range_button.text())
+print(getattr(window, "clip_range_popup", None))
+print(window.current_clip_range())
+print("clip_range" in window._candidate_for_download({"id": "row"}, {"title": "Video"}))
+window.clip_start_input.setText("00:00:10")
+window.clip_end_input.setText("00:00:20")
+print(window.current_clip_range())
+print("clip_range" in window._candidate_for_download({"id": "row"}, {"title": "Video"}))
+window._apply_clip_range_popup()
+print(window.current_clip_range())
+print(window._candidate_for_download({"id": "row"}, {"title": "Video"}).get("clip_range"))
+window.clip_start_input.setText("00:00:00")
+window.clip_end_input.setText("00:00:00")
+window._apply_clip_range_popup()
+print(window.current_clip_range())
+print("clip_range" in window._candidate_for_download({"id": "row"}, {"title": "Video"}))
+window.clip_start_input.setText("00:12:12")
+window.clip_end_input.setText("00:13:00")
+window._apply_clip_range_popup()
+window.url_input.setText("https://media.test/changed")
+print(window.clip_start_input.text())
+print(window.clip_end_input.text())
+print(window.current_clip_range())
+window.clip_start_input.setText("00:10:00")
+window.clip_end_input.setText("00:20:00")
+window._apply_clip_range_popup()
+window._toggle_clip_range_popup()
+window.clip_start_input.setText("00:30:00")
+window.clip_range_popup.close()
+app.processEvents()
+print(window.clip_start_input.text())
+print(window.clip_end_input.text())
+print(window.current_clip_range())
+print(window.clip_cut_mode())
+window.clip_cut_accurate.setChecked(True)
+print(window.clip_cut_mode())
+print(window._candidate_for_download({"id": "row"}, {"title": "Video"}).get("clip_cut_mode"))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "구간선택",
+                "None",
+                "None",
+                "False",
+                "None",
+                "False",
+                "{'start': 10.0, 'end': 20.0}",
+                "{'start': 10.0, 'end': 20.0}",
+                "None",
+                "False",
+                "",
+                "",
+                "None",
+                "00:10:00",
+                "00:20:00",
+                "{'start': 600.0, 'end': 1200.0}",
+                "fast",
+                "accurate",
+                "accurate",
+            ],
+        )
+
+    def test_clipflow_qt_clip_range_button_reveals_options_popup(self):
+        script = r'''
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QPushButton, QComboBox
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.show()
+app.processEvents()
+print(getattr(window, "clip_range_popup", None))
+QTest.mouseClick(window.clip_range_button, Qt.LeftButton)
+app.processEvents()
+print(window.clip_range_popup.isVisible())
+print(window.clip_start_label.text())
+print(window.clip_end_label.text())
+print(window.clip_start_input.display_text())
+print(window.clip_end_input.display_text())
+print(len(window.clip_range_popup.findChildren(QComboBox)))
+print([button.text() for button in window.clip_range_popup.findChildren(QPushButton)])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["None", "True", "시작시간", "종료시간", "HH:MM:SS", "HH:MM:SS", "0", "['빠른 컷', '정확 컷', '초기화', '적용']"],
+        )
+
+    def test_clipflow_qt_invalid_clip_range_does_not_start_download(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+calls = []
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    calls.append(candidate)
+    return {"ok": True, "output_dir": output_dir, "target_url": page_url}
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download)
+window._analysis_finished(fake_analyze("https://media.test/video"))
+window.clip_start_input.setText("00:00:20")
+window.clip_end_input.setText("00:00:10")
+window._apply_clip_range_popup()
+print(window.clip_start_input.text())
+window.clip_start_input.setText("00:60:00")
+window.clip_end_input.setText("01:00:00")
+window._apply_clip_range_popup()
+window.start_download_for_row(window.rows[0])
+while window.active_downloads:
+    app.processEvents()
+print(len(calls))
+print(any("종료구간" in message for message in window.event_messages))
+print(any("59 이하" in message for message in window.event_messages))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["00:00:20", "0", "True", "True"])
+
+    def test_clipflow_qt_timecode_input_supports_parts_and_direct_text(self):
+        script = r'''
+from PySide6.QtCore import Qt, QPoint
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_widgets import TimecodeInput
+
+app = QApplication([])
+field = TimecodeInput()
+field.resize(172, 36)
+field.show()
+app.processEvents()
+print(field.display_text())
+print(field.sizeHint().width() >= 160)
+field.set_time_parts(1, 2, 3)
+print(field.text())
+field.setText("00:10:05")
+print(field.time_seconds())
+field.set_selected_segment(0)
+QTest.keyClicks(field, "121212")
+print(field.text())
+print(field.time_seconds())
+field.clear()
+field.set_selected_segment(1)
+QTest.keyClicks(field, "1212")
+print(field.text())
+field.setText("12:12:12")
+field.set_selected_segment(1)
+QTest.keyClicks(field, "31")
+print(field.text())
+print(field.selected_segment())
+print(field.has_selected_segment())
+field.clear()
+field.set_selected_segment(0)
+QTest.keyClicks(field, "1")
+QTest.keyClick(field, Qt.Key_Tab)
+print(field.text())
+print(field.selected_segment())
+field.clear()
+field.set_selected_segment(1)
+QTest.keyClicks(field, "5")
+print(field.text())
+field.clear()
+field.set_selected_segment(2)
+QTest.keyClicks(field, "7")
+print(field.text())
+field.setText("12:31:12")
+field.set_selected_segment(2)
+QTest.keyClicks(field, "45")
+print(field.text())
+print(field.selected_segment())
+field.set_selected_segment(1)
+QTest.keyClicks(field, "99")
+print(field.display_text())
+print(field.selected_segment())
+field.set_selected_segment(2)
+QTest.keyClicks(field, "99")
+print(field.display_text())
+print(field.selected_segment())
+print(len(field._segment_rects))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["HH:MM:SS", "True", "01:02:03", "605.0", "12:12:12", "43932.0", "00:12:12", "12:31:12", "2", "True", "01:00:00", "1", "00:05:00", "00:00:07", "12:31:45", "2", "12:MM:45", "1", "12:00:SS", "2", "3"])
+
+    def test_clipflow_qt_start_seconds_advances_to_end_time(self):
+        script = r'''
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.show()
+app.processEvents()
+window.clip_start_input.set_selected_segment(2)
+QTest.keyClicks(window.clip_start_input, "45")
+app.processEvents()
+print(window.clip_start_input.text())
+print(window.clip_end_input.has_selected_segment())
+print(window.clip_end_input.selected_segment())
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["00:00:45", "True", "0"])
+
+    def test_clipflow_qt_row_level_segment_download_creates_fixed_row(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+downloads = []
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    downloads.append(candidate)
+    if on_event:
+        on_event({"type": "file", "path": output_dir + "/Video [00m10s-00m20s].mp4"})
+    return {"ok": True, "output_dir": output_dir, "output_path": output_dir + "/Video [00m10s-00m20s].mp4", "target_url": page_url}
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 30},
+        ],
+        "warnings": [],
+    }
+
+window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download)
+window._analysis_finished(fake_analyze("https://media.test/video"))
+source = window.rows[0]
+window.download_segment_for_row(source, {"start": 10.0, "end": 20.0})
+while window.active_downloads:
+    app.processEvents()
+print(len(window.rows))
+print("clip_range" in source["candidate"])
+fixed = next(row for row in window.rows if row.get("fixed_candidate"))
+print(fixed["fixed_candidate"])
+print(fixed["candidate"]["clip_range"])
+print(fixed["candidate"]["display_title"])
+print(fixed["candidate"]["duration"])
+print(fixed["candidate"]["sort_bytes"])
+print(downloads[0]["clip_range"])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "2",
+                "False",
+                "True",
+                "{'start': 10.0, 'end': 20.0}",
+                "Video [00m10s-00m20s]",
+                "10",
+                "2",
+                "{'start': 10.0, 'end': 20.0}",
+            ],
+        )
+
+    def test_clipflow_qt_completed_history_preserves_clip_range_without_signed_cdn_url(self):
+        script = r'''
+from tools.clipflow_qt import ClipFlowWindow, COMPLETED_STATUS
+from PySide6.QtWidgets import QApplication
+
+app = QApplication([])
+window = ClipFlowWindow()
+window.rows = [
+    {
+        "id": "row-1",
+        "kind": "video",
+        "candidate": {
+            "id": "best",
+            "title": "Video",
+            "display_title": "Video",
+            "url": "https://cdn.example.test/signed.mp4?token=secret",
+            "source": "https://chzzk.naver.com/video/1",
+            "output_ext": "mp4",
+            "clip_range": {"start": 10.0, "end": 20.0},
+        },
+        "status": COMPLETED_STATUS,
+        "source_url": "https://chzzk.naver.com/video/1",
+        "analysis_source_url": "https://chzzk.naver.com/video/1",
+        "output_path": "C:/Out/Video [00m10s-00m20s].mp4",
+        "messages": [],
+    }
+]
+payload = window._completed_history_payload()
+candidate = payload[0]["candidate"]
+print(candidate["clip_range"])
+print(candidate.get("url", ""))
+print(candidate["source"])
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "{'start': 10.0, 'end': 20.0}",
+                "",
+                "https://chzzk.naver.com/video/1",
+            ],
+        )
+
     def test_clipflow_qt_playlist_entry_event_attaches_cached_analysis_info_to_child_download(self):
         script = r'''
 from PySide6.QtWidgets import QApplication
@@ -5623,16 +5971,17 @@ from tools.clipflow_icons import CustomTooltip, LucideIconButton, show_tooltip_a
 
 app = QApplication([])
 button = LucideIconButton("folder", size=32, icon_size=18)
-button.move(200, 200)
+button.move(400, 400)
 button.show()
 app.processEvents()
 show_tooltip_above(button, "폴더 열기")
 app.processEvents()
 tooltip = CustomTooltip.instance()
+bubble = tooltip.bubble_geometry().translated(tooltip.geometry().topLeft())
 button_top = button.mapToGlobal(button.rect().topLeft()).y()
-gap = button_top - tooltip.geometry().bottom()
+gap = button_top - bubble.bottom()
 print(gap)
-print(0 <= gap <= 4)
+print(2 <= gap <= 6)
 '''
         result = run_qt_script(script)
 

@@ -8,6 +8,8 @@ import sys
 import tempfile
 import threading
 import time
+import queue
+import contextlib
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -40,6 +42,7 @@ SIZE_PROBE_LIMIT = 12
 DIRECT_MEDIA_PARALLEL_THRESHOLD = 64 * 1024 * 1024
 DIRECT_MEDIA_PARALLEL_PART_SIZE = 16 * 1024 * 1024
 DIRECT_MEDIA_PARALLEL_WORKERS = 4
+DIRECT_MEDIA_SEGMENT_NO_PROGRESS_TIMEOUT = 30.0
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
     "google chrome": ("chrome",),
@@ -125,6 +128,57 @@ def ffmpeg_path():
     except Exception:
         _FFMPEG_PATH = None
     return _FFMPEG_PATH
+
+
+def ffmpeg_path_for_yt_dlp(ffmpeg_exe=None, cache_dir=None):
+    value = ffmpeg_exe or ffmpeg_path()
+    if not value:
+        return None
+    source = Path(value)
+    standard_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    if source.name.lower() == standard_name:
+        return str(source)
+    if cache_dir is None:
+        root = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "ClipFlow" / "bin"
+    else:
+        root = Path(cache_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / standard_name
+    try:
+        if target.exists() and source.exists() and target.stat().st_size == source.stat().st_size:
+            return str(target)
+    except OSError:
+        pass
+    try:
+        if target.exists():
+            target.unlink()
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+    try:
+        target.chmod(target.stat().st_mode | 0o111)
+    except OSError:
+        pass
+    return str(target)
+
+
+@contextlib.contextmanager
+def yt_dlp_ffmpeg_path_context(options):
+    ffmpeg_exe = (options or {}).get("external_downloader") or (options or {}).get("ffmpeg_location")
+    if not ffmpeg_exe:
+        yield
+        return
+    ffmpeg_dir = str(Path(ffmpeg_exe).parent)
+    original = os.environ.get("PATH", "")
+    parts = [part for part in original.split(os.pathsep) if part]
+    if any(os.path.normcase(part) == os.path.normcase(ffmpeg_dir) for part in parts):
+        yield
+        return
+    os.environ["PATH"] = ffmpeg_dir + (os.pathsep + original if original else "")
+    try:
+        yield
+    finally:
+        os.environ["PATH"] = original
 
 
 def safe_int(value, default=0):
@@ -272,8 +326,146 @@ def clean_video_title(value):
     return title
 
 
+def parse_timecode(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.startswith("-"):
+        raise ValueError("구간 시간은 0 이상이어야 합니다.")
+    parts = text.split(":")
+    if len(parts) > 3:
+        raise ValueError("시간 형식은 HH:MM:SS 또는 MM:SS로 입력하세요.")
+    try:
+        values = [float(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError("시간은 숫자로 입력하세요.") from exc
+    if any(part < 0 for part in values):
+        raise ValueError("구간 시간은 0 이상이어야 합니다.")
+    if len(values) == 1:
+        return values[0]
+    if any(part >= 60 for part in values[1:]):
+        raise ValueError("분과 초는 59 이하로 입력하세요.")
+    total = 0.0
+    for part in values:
+        total = total * 60 + part
+    return total
+
+
+def normalize_clip_range(start_text, end_text, duration=0):
+    start = parse_timecode(start_text)
+    end = parse_timecode(end_text)
+    if start is None and end is None:
+        return None
+    start = float(start or 0)
+    if end is not None:
+        end = float(end)
+        duration = safe_int(duration)
+        if duration and end > duration:
+            end = float(duration)
+        if end <= start:
+            raise ValueError("종료구간은 시작구간보다 뒤여야 합니다.")
+    return {"start": float(start), "end": end}
+
+
+def clip_range_from_candidate(candidate):
+    clip_range = (candidate or {}).get("clip_range")
+    if not isinstance(clip_range, dict):
+        return None
+    start = clip_range.get("start")
+    end = clip_range.get("end")
+    try:
+        source_duration = (candidate or {}).get("source_duration") or (candidate or {}).get("duration") or 0
+        normalized = normalize_clip_range(start, end, duration=source_duration)
+    except ValueError:
+        return None
+    return normalized
+
+
+def format_timecode_for_filename(seconds):
+    seconds = max(0, int(float(seconds or 0)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}h{minutes:02d}m{secs:02d}s"
+    return f"{minutes:02d}m{secs:02d}s"
+
+
+def clip_range_suffix(clip_range):
+    if not isinstance(clip_range, dict):
+        return ""
+    try:
+        normalized = normalize_clip_range(clip_range.get("start"), clip_range.get("end"))
+    except ValueError:
+        return ""
+    if not normalized:
+        return ""
+    start = format_timecode_for_filename(normalized["start"])
+    end = normalized.get("end")
+    end_text = format_timecode_for_filename(end) if end is not None else "end"
+    return f"[{start}-{end_text}]"
+
+
+def title_with_clip_range_suffix(title, clip_range):
+    text = str(title or "").strip()
+    suffix = clip_range_suffix(clip_range)
+    if not suffix:
+        return text
+    if text.endswith(suffix):
+        return text
+    return f"{text} {suffix}".strip()
+
+
+def clip_cut_mode(candidate):
+    return "accurate" if str((candidate or {}).get("clip_cut_mode") or "").lower() == "accurate" else "fast"
+
+
+def candidate_with_clip_range_metadata(candidate):
+    prepared = dict(candidate or {})
+    clip_range = clip_range_from_candidate(prepared)
+    if not clip_range:
+        return prepared
+    prepared["clip_range"] = clip_range
+    for key in ("title", "display_title"):
+        value = prepared.get(key)
+        if value:
+            prepared[key] = title_with_clip_range_suffix(value, clip_range)
+    if not prepared.get("display_title") and prepared.get("title"):
+        prepared["display_title"] = prepared["title"]
+    if not prepared.get("title") and prepared.get("display_title"):
+        prepared["title"] = prepared["display_title"]
+
+    original_duration = safe_int((candidate or {}).get("duration"))
+    if original_duration and not prepared.get("source_duration"):
+        prepared["source_duration"] = original_duration
+    start = float(clip_range.get("start") or 0)
+    end = clip_range.get("end")
+    clip_duration = 0
+    if end is not None:
+        clip_duration = max(0, int(round(float(end) - start)))
+    elif original_duration and start < original_duration:
+        clip_duration = max(0, int(round(original_duration - start)))
+    if clip_duration:
+        prepared["duration"] = clip_duration
+
+    original_size = candidate_expected_size(candidate)
+    if original_size and original_duration and clip_duration:
+        estimated = max(1, int(round(original_size * min(clip_duration, original_duration) / original_duration)))
+        prepared["sort_bytes"] = estimated
+        if safe_int((candidate or {}).get("filesize")):
+            prepared["filesize"] = estimated
+            prepared["filesize_approx"] = 0
+        else:
+            prepared["filesize"] = 0
+            prepared["filesize_approx"] = estimated
+        prepared["size_source"] = "clip_estimate"
+    return prepared
+
+
 def filename_stem_for_candidate(candidate):
     title = clean_video_title(candidate.get("display_title") or candidate.get("title") or "video")
+    title = title_with_clip_range_suffix(title, (candidate or {}).get("clip_range"))
     try:
         from yt_dlp.utils import sanitize_filename
 
@@ -1380,7 +1572,7 @@ def build_ydl_options(cookie_source="없음", on_event=None, quiet=True, proxy_u
         options["proxy"] = proxy
     bundled_ffmpeg = ffmpeg_path()
     if bundled_ffmpeg:
-        options["ffmpeg_location"] = bundled_ffmpeg
+        options["ffmpeg_location"] = ffmpeg_path_for_yt_dlp(bundled_ffmpeg)
     if impersonate:
         target = chrome_impersonation_target()
         if target:
@@ -1434,6 +1626,17 @@ def build_download_options(candidate, output_dir, cookie_source="없음", on_eve
             options["postprocessors"] = [{"key": "FFmpegVideoConvertor", "preferedformat": output_ext}]
         elif is_hls_manifest_format(candidate):
             options["fixup"] = "never"
+    clip_range = clip_range_from_candidate(candidate)
+    if clip_range:
+        ffmpeg_exe = ffmpeg_path() or shutil.which("ffmpeg")
+        if not ffmpeg_exe:
+            raise RuntimeError("ffmpeg is required for segment downloads")
+        from yt_dlp.utils import download_range_func
+
+        end = clip_range.get("end")
+        options["download_ranges"] = download_range_func([], [(float(clip_range["start"]), float(end) if end is not None else float("inf"))])
+        options["external_downloader"] = options.get("ffmpeg_location") or ffmpeg_path_for_yt_dlp(ffmpeg_exe)
+        options["force_keyframes_at_cuts"] = bool((candidate or {}).get("force_keyframes_at_cuts", False)) or clip_cut_mode(candidate) == "accurate"
     return options
 
 
@@ -2209,6 +2412,8 @@ def download_direct_media_single(url, output_path, headers, total=0, on_event=No
             if total and (now - last_progress >= 0.25 or downloaded >= total):
                 last_progress = now
                 emit_direct_download_progress(on_event, downloaded, total, started_at)
+    if total and downloaded != total:
+        raise RuntimeError(f"Direct media download incomplete: downloaded {downloaded} bytes, expected {total}.")
     return part_path
 
 
@@ -2223,9 +2428,23 @@ def direct_media_ranges(total, part_size=None):
         start = end + 1
 
 
+def direct_media_range_supported(url, headers):
+    range_headers = {**headers, "Range": "bytes=0-0"}
+    request = urllib.request.Request(url, headers=range_headers)
+    with urllib.request.urlopen(request, timeout=30) as response:
+        if safe_int(getattr(response, "status", 206)) != 206:
+            return False
+        content_range = str(getattr(response, "headers", {}).get("Content-Range", "") or "")
+        return not content_range or content_range.lower().startswith("bytes ")
+
+
 def download_direct_media_parallel(url, output_path, headers, total, on_event=None):
     part_path = output_path.with_name(output_path.name + ".part")
-    segment_paths = []
+    ranges = [
+        (index, start, end, part_path.with_name(f"{part_path.name}.{index}"))
+        for index, start, end in direct_media_ranges(total)
+    ]
+    segment_paths = [segment_path for _index, _start, _end, segment_path in ranges]
     downloaded = 0
     downloaded_lock = threading.Lock()
     progress_lock = threading.Lock()
@@ -2244,9 +2463,7 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
                 emit_direct_download_progress(on_event, current, total, started_at)
 
     def download_range(range_info):
-        index, start, end = range_info
-        segment_path = part_path.with_name(f"{part_path.name}.{index}")
-        segment_paths.append(segment_path)
+        index, start, end, segment_path = range_info
         range_headers = {**headers, "Range": f"bytes={start}-{end}"}
         request = urllib.request.Request(url, headers=range_headers)
         written = 0
@@ -2265,7 +2482,6 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
             raise RuntimeError(f"Direct media range returned {written} bytes, expected {expected}.")
         return index, segment_path
 
-    ranges = list(direct_media_ranges(total))
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, safe_int(DIRECT_MEDIA_PARALLEL_WORKERS))) as executor:
             completed = sorted(executor.map(download_range, ranges), key=lambda item: item[0])
@@ -2295,6 +2511,8 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
     emit_event(on_event, "status", message="Starting parallel direct download" if use_parallel else "Starting direct download")
     if use_parallel:
         try:
+            if not direct_media_range_supported(url, headers):
+                raise DirectMediaRangeUnsupported("Direct media range request was not honored.")
             part_path = download_direct_media_parallel(url, output_path, headers, total, on_event=on_event)
         except DirectMediaRangeUnsupported:
             emit_event(on_event, "status", message="Range download unsupported; retrying direct download")
@@ -2304,6 +2522,181 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
     part_path.replace(output_path)
     emit_event(on_event, "file", path=str(output_path))
     emit_event(on_event, "done", path=str(output_dir))
+    return {
+        "ok": True,
+        "output_dir": str(output_dir),
+        "output_path": str(output_path),
+        "target_url": url,
+    }
+
+
+def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffmpeg_exe=None, runner=None, no_progress_timeout=None):
+    output_dir = Path(output_dir).expanduser()
+    output_path = final_output_path_for_candidate(candidate, output_dir)
+    if output_path is None:
+        raise RuntimeError("Direct media segment output path could not be determined.")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    part_path = output_path.with_name(output_path.name + ".part")
+    clip_range = clip_range_from_candidate(candidate)
+    if not clip_range:
+        raise RuntimeError("Clip range is required for segment downloads")
+    ffmpeg_exe = ffmpeg_exe or ffmpeg_path() or shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        raise RuntimeError("ffmpeg is required for segment downloads")
+    headers = direct_media_request_headers(candidate)
+    header_arg = "".join(f"{key}: {value}\r\n" for key, value in headers.items())
+    start = float(clip_range["start"])
+    end = clip_range.get("end")
+    duration = float(end - start) if end is not None else 0
+    cut_mode = clip_cut_mode(candidate)
+    command = [
+        str(ffmpeg_exe),
+        "-y",
+        "-hide_banner",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-headers",
+        header_arg,
+    ]
+    if cut_mode == "accurate":
+        preseek = max(0.0, start - 5.0)
+        if preseek:
+            command += ["-ss", str(preseek)]
+        command += ["-i", url]
+        offset = start - preseek
+        if offset:
+            command += ["-ss", str(offset)]
+    else:
+        command += ["-ss", str(start), "-i", url]
+    if duration:
+        command += ["-t", str(duration)]
+    output_format = normalized_output_ext((candidate or {}).get("output_ext")) or "mp4"
+    command += ["-map", "0"]
+    if cut_mode == "accurate":
+        command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k"]
+    else:
+        command += ["-c", "copy"]
+    command += ["-movflags", "+faststart", "-f", output_format, str(part_path)]
+    emit_event(on_event, "status", message="Downloading selected segment")
+    process = (runner or subprocess.Popen)(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    output_lines = []
+    progress_values = {}
+    line_queue = queue.Queue()
+
+    def read_stdout():
+        stream = getattr(process, "stdout", None)
+        try:
+            if hasattr(stream, "readline"):
+                while True:
+                    line = stream.readline()
+                    if not line:
+                        break
+                    line_queue.put(line)
+            elif stream is not None:
+                for line in stream:
+                    line_queue.put(line)
+        finally:
+            line_queue.put(None)
+
+    reader = threading.Thread(target=read_stdout, daemon=True)
+    reader.start()
+    timeout = DIRECT_MEDIA_SEGMENT_NO_PROGRESS_TIMEOUT if no_progress_timeout is None else float(no_progress_timeout)
+    last_progress = time.monotonic()
+    reader_done = False
+    last_percent = -1.0
+    stderr_text = ""
+
+    def emit_ffmpeg_progress():
+        nonlocal last_progress, last_percent
+        raw_time = progress_values.get("out_time_ms") or progress_values.get("out_time_us")
+        current = safe_int(raw_time) / 1_000_000 if raw_time is not None else 0
+        if duration:
+            percent = max(0, min(100, current * 100 / duration))
+        else:
+            percent = 0
+        if duration and percent <= last_percent and percent < 100:
+            return
+        last_percent = percent
+        last_progress = time.monotonic()
+        speed_text = str(progress_values.get("speed") or "").strip()
+        eta_text = display_duration(max(0, int(round(duration - current)))) if duration else ""
+        message = f"{percent:.1f}%"
+        if speed_text:
+            message = f"{message} {speed_text}"
+        if eta_text:
+            message = f"{message} ETA {eta_text}"
+        emit_event(
+            on_event,
+            "progress",
+            percent=percent,
+            speed_text=speed_text,
+            eta_text=eta_text,
+            message=message,
+        )
+
+    try:
+        while True:
+            try:
+                line = line_queue.get(timeout=0.1)
+            except queue.Empty:
+                poll = getattr(process, "poll", None)
+                process_done = poll() is not None if callable(poll) else False
+                if reader_done and (process_done or not callable(poll)):
+                    break
+                if timeout >= 0 and time.monotonic() - last_progress >= timeout:
+                    kill = getattr(process, "kill", None)
+                    if callable(kill):
+                        kill()
+                    raise RuntimeError("ffmpeg segment download timed out without progress")
+                continue
+            if line is None:
+                reader_done = True
+                poll = getattr(process, "poll", None)
+                if not callable(poll) or poll() is not None:
+                    break
+                continue
+            line = str(line).strip()
+            if not line:
+                continue
+            output_lines.append(line)
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            progress_values[key] = value
+            if key in {"progress", "out_time_ms", "out_time_us"}:
+                emit_ffmpeg_progress()
+        returncode = process.wait()
+        communicate = getattr(process, "communicate", None)
+        if callable(communicate):
+            _stdout, stderr_text = communicate(timeout=1)
+    except Exception:
+        try:
+            part_path.unlink()
+        except OSError:
+            pass
+        raise
+    if returncode != 0:
+        try:
+            part_path.unlink()
+        except OSError:
+            pass
+        message = (stderr_text or "\n".join(output_lines) or "ffmpeg segment download failed").strip()
+        raise RuntimeError(message)
+    if not completed_output_exists(part_path, candidate):
+        raise RuntimeError("ffmpeg segment download produced no output")
+    part_path.replace(output_path)
+    emit_event(on_event, "progress", percent=100, message="100.0%")
+    emit_event(on_event, "file", path=str(output_path))
+    emit_event(on_event, "done", path=str(output_path))
     return {
         "ok": True,
         "output_dir": str(output_dir),
@@ -2329,6 +2722,8 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
     if candidate.get("format_selector") == "best" and candidate.get("url"):
         target_url = candidate["url"]
     if is_chzzk_direct_mp4_candidate(candidate):
+        if clip_range_from_candidate(candidate):
+            return download_direct_media_segment(target_url, candidate, output_dir, on_event=on_event)
         return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
 
     if ydl_factory is None:
@@ -2336,12 +2731,14 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
     options = build_download_options(candidate, output_dir, cookie_source=cookie_source, on_event=on_event, proxy_url=proxy_url)
     emit_event(on_event, "status", message="Starting download")
     try:
-        with ydl_factory(options) as ydl:
-            download_info = candidate.get("_download_info") if isinstance(candidate, dict) else None
-            if isinstance(download_info, dict) and download_info and download_info_reuse_supported(candidate):
-                ydl.process_video_result(json_ready_download_info(download_info), download=True)
-            else:
-                ydl.download([target_url])
+        with yt_dlp_ffmpeg_path_context(options):
+            with ydl_factory(options) as ydl:
+                download_info = candidate.get("_download_info") if isinstance(candidate, dict) else None
+                if isinstance(download_info, dict) and download_info and download_info_reuse_supported(candidate):
+                    ydl.process_video_result(json_ready_download_info(download_info), download=True)
+                else:
+                    ydl.download([target_url])
+        emit_event(on_event, "progress", percent=100, message="100.0%")
     except Exception as exc:
         if not should_retry_progressive_mp4(candidate, exc):
             raise
@@ -2358,12 +2755,14 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
             proxy_url=proxy_url,
         )
         try:
-            with ydl_factory(fallback_options) as ydl:
-                download_info = fallback_candidate.get("_download_info") if isinstance(fallback_candidate, dict) else None
-                if isinstance(download_info, dict) and download_info and download_info_reuse_supported(fallback_candidate):
-                    ydl.process_video_result(json_ready_download_info(download_info), download=True)
-                else:
-                    ydl.download([target_url])
+            with yt_dlp_ffmpeg_path_context(fallback_options):
+                with ydl_factory(fallback_options) as ydl:
+                    download_info = fallback_candidate.get("_download_info") if isinstance(fallback_candidate, dict) else None
+                    if isinstance(download_info, dict) and download_info and download_info_reuse_supported(fallback_candidate):
+                        ydl.process_video_result(json_ready_download_info(download_info), download=True)
+                    else:
+                        ydl.download([target_url])
+            emit_event(on_event, "progress", percent=100, message="100.0%")
         except Exception as fallback_exc:
             if not (cookie_spec(cookie_source) and should_retry_progressive_mp4(fallback_candidate, fallback_exc, allow_progressive=True)):
                 raise
@@ -2375,12 +2774,14 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
                 on_event=on_event,
                 proxy_url=proxy_url,
             )
-            with ydl_factory(no_cookie_options) as ydl:
-                download_info = fallback_candidate.get("_download_info") if isinstance(fallback_candidate, dict) else None
-                if isinstance(download_info, dict) and download_info and download_info_reuse_supported(fallback_candidate):
-                    ydl.process_video_result(json_ready_download_info(download_info), download=True)
-                else:
-                    ydl.download([target_url])
+            with yt_dlp_ffmpeg_path_context(no_cookie_options):
+                with ydl_factory(no_cookie_options) as ydl:
+                    download_info = fallback_candidate.get("_download_info") if isinstance(fallback_candidate, dict) else None
+                    if isinstance(download_info, dict) and download_info and download_info_reuse_supported(fallback_candidate):
+                        ydl.process_video_result(json_ready_download_info(download_info), download=True)
+                    else:
+                        ydl.download([target_url])
+            emit_event(on_event, "progress", percent=100, message="100.0%")
     emit_event(on_event, "done", path=str(output_dir))
     return {"ok": True, "output_dir": str(output_dir), "target_url": target_url}
 

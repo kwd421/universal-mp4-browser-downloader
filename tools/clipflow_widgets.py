@@ -153,6 +153,202 @@ class PathDisplayInput(QLineEdit):
         self._set_field_focus(False)
 
 
+class TimecodeInput(QWidget):
+    textChanged = Signal(str)
+    editingComplete = Signal()
+
+    def __init__(self, placeholder=None, parent=None):
+        del placeholder
+        super().__init__(parent)
+        self.setObjectName("BareInput")
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.IBeamCursor)
+        self._parts = [None, None, None]
+        self._selected_segment = None
+        self._entry_buffer = ""
+        self._segment_rects = []
+        self.setMinimumSize(164, 28)
+
+    def placeholderText(self):
+        return "HH:MM:SS"
+
+    def sizeHint(self):
+        return QSize(164, 28)
+
+    def selected_segment(self):
+        return -1 if self._selected_segment is None else self._selected_segment
+
+    def has_selected_segment(self):
+        return self._selected_segment is not None
+
+    def set_selected_segment(self, segment):
+        self._selected_segment = max(0, min(2, int(segment)))
+        self._entry_buffer = ""
+        self.setFocus(Qt.MouseFocusReason)
+        self.update()
+
+    def display_text(self):
+        labels = ("HH", "MM", "SS")
+        return ":".join(labels[index] if value is None else f"{value:02d}" for index, value in enumerate(self._parts))
+
+    def text(self):
+        if all(value is None for value in self._parts):
+            return ""
+        return ":".join(f"{(value if value is not None else 0):02d}" for value in self._parts)
+
+    def setText(self, text):
+        old = self.text()
+        text = str(text or "").strip()
+        if not text:
+            self._parts = [None, None, None]
+        else:
+            if text.isdigit():
+                padded = text[:6].ljust(6, "0")
+                raw_parts = [padded[0:2], padded[2:4], padded[4:6]]
+            else:
+                raw_parts = text.split(":")
+                if len(raw_parts) > 3:
+                    raw_parts = raw_parts[:3]
+                while len(raw_parts) < 3:
+                    raw_parts.append("0")
+            values = []
+            for raw in raw_parts:
+                try:
+                    value = int(raw or 0)
+                except ValueError:
+                    value = 0
+                values.append(max(0, min(99, value)))
+            self._parts = values
+        self._entry_buffer = ""
+        self.update()
+        if self.text() != old:
+            self.textChanged.emit(self.text())
+
+    def clear(self):
+        self.setText("")
+
+    def set_time_parts(self, hours, minutes, seconds):
+        self.setText(f"{int(hours or 0):02d}:{int(minutes or 0):02d}:{int(seconds or 0):02d}")
+
+    def normalize_text(self):
+        return self.text()
+
+    def time_seconds(self):
+        text = self.text()
+        if not text:
+            return None
+        hours, minutes, seconds = (int(part or 0) for part in text.split(":"))
+        return float(hours * 3600 + minutes * 60 + seconds)
+
+    def mousePressEvent(self, event):
+        for index, rect in enumerate(self._segment_rects):
+            if rect.contains(event.position().toPoint()):
+                self.set_selected_segment(index)
+                event.accept()
+                return
+        self.set_selected_segment(0)
+        event.accept()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        text = event.text()
+        if text.isdigit():
+            self._type_digit(text)
+            event.accept()
+            return
+        if key in (Qt.Key_Left, Qt.Key_Backtab):
+            self.set_selected_segment(max(0, self.selected_segment() - 1))
+            event.accept()
+            return
+        if key in (Qt.Key_Right, Qt.Key_Tab):
+            self.set_selected_segment(min(2, self.selected_segment() + 1))
+            event.accept()
+            return
+        if key in (Qt.Key_Backspace, Qt.Key_Delete):
+            if self._selected_segment is None:
+                self.set_selected_segment(0)
+            self._parts[self._selected_segment] = None
+            self._entry_buffer = ""
+            self.update()
+            self.textChanged.emit(self.text())
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):
+        self._entry_buffer = ""
+        super().focusOutEvent(event)
+
+    def _type_digit(self, digit):
+        if self._selected_segment is None:
+            self.set_selected_segment(0)
+        segment = self._selected_segment
+        self._entry_buffer = (self._entry_buffer + digit)[-2:]
+        value = int(self._entry_buffer)
+        limit = 99 if segment == 0 else 59
+        if value > limit:
+            self._parts[segment] = None
+            self._entry_buffer = ""
+            self.update()
+            self.textChanged.emit(self.text())
+            return
+        for index in range(segment):
+            if self._parts[index] is None:
+                self._parts[index] = 0
+        self._parts[segment] = value
+        if len(self._entry_buffer) >= 2:
+            if segment < 2:
+                self._selected_segment = segment + 1
+            else:
+                self.editingComplete.emit()
+            self._entry_buffer = ""
+        self.update()
+        self.textChanged.emit(self.text())
+
+    def _part_rects(self, painter):
+        metrics = painter.fontMetrics()
+        box_width = 34
+        box_height = min(28, max(24, self.height() - 4))
+        unit_gap = 4
+        group_gap = 8
+        unit_widths = [metrics.horizontalAdvance(unit) for unit in ("h", "m", "s")]
+        total = box_width * 3 + unit_gap * 3 + sum(unit_widths) + group_gap * 2
+        x = (self.width() - total) / 2
+        y = (self.height() - box_height) // 2
+        rects = []
+        for index, unit_width in enumerate(unit_widths):
+            rects.append(QRect(int(x), y, box_width, box_height))
+            x += box_width + unit_gap + unit_width
+            if index < 2:
+                x += group_gap
+        return rects
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        font = painter.font()
+        font.setPixelSize(13)
+        font.setWeight(QFont.DemiBold)
+        painter.setFont(font)
+        self._segment_rects = self._part_rects(painter)
+        labels = self.display_text().split(":")
+        metrics = painter.fontMetrics()
+        units = ("h", "m", "s")
+        for index, label in enumerate(labels):
+            selected = index == self._selected_segment and self.hasFocus()
+            rect = self._segment_rects[index]
+            painter.setPen(QPen(QColor(theme.ACCENT if selected else theme.FIELD_BORDER), 1))
+            painter.setBrush(QColor(theme.ACCENT_TINT if selected else theme.SURFACE))
+            painter.drawRoundedRect(rect, 7, 7)
+            color = theme.MUTED if self._parts[index] is None else theme.INK
+            painter.setPen(QColor(color))
+            painter.drawText(rect, Qt.AlignCenter, "--" if self._parts[index] is None else label)
+            unit_x = rect.right() + 5
+            painter.setPen(QColor(theme.MUTED))
+            painter.drawText(QRect(unit_x, 0, metrics.horizontalAdvance(units[index]) + 1, self.height()), Qt.AlignVCenter | Qt.AlignLeft, units[index])
+
+
 def _rounded_pixmap(pixmap, width, height, radius):
     scaled = pixmap.scaled(width, height, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
     result = QPixmap(width, height)

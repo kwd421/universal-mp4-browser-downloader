@@ -336,6 +336,145 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(options["cookiesfrombrowser"], ("chrome",))
         self.assertEqual(options["proxy"], "http://127.0.0.1:8080")
 
+    def test_parse_timecode_accepts_seconds_minutes_and_hours(self):
+        self.assertIsNone(engine.parse_timecode(""))
+        self.assertIsNone(engine.parse_timecode(None))
+        self.assertEqual(engine.parse_timecode("90"), 90)
+        self.assertEqual(engine.parse_timecode("1:30"), 90)
+        self.assertEqual(engine.parse_timecode("01:02:03.5"), 3723.5)
+        with self.assertRaises(ValueError):
+            engine.parse_timecode("abc")
+        with self.assertRaises(ValueError):
+            engine.parse_timecode("-1")
+
+    def test_normalize_clip_range_handles_empty_start_and_end_validation(self):
+        self.assertIsNone(engine.normalize_clip_range("", ""))
+        self.assertEqual(engine.normalize_clip_range("10", ""), {"start": 10.0, "end": None})
+        self.assertEqual(engine.normalize_clip_range("", "20"), {"start": 0.0, "end": 20.0})
+        self.assertEqual(engine.normalize_clip_range("10", "20"), {"start": 10.0, "end": 20.0})
+        with self.assertRaises(ValueError):
+            engine.normalize_clip_range("20", "10")
+
+    def test_clip_range_suffix_keeps_segment_download_filenames_distinct(self):
+        full = engine.final_output_path_for_candidate({"title": "Video", "output_ext": "mp4"}, "C:/Temp")
+        clipped = engine.final_output_path_for_candidate(
+            {"title": "Video", "output_ext": "mp4", "clip_range": {"start": 10, "end": 20}},
+            "C:/Temp",
+        )
+
+        self.assertEqual(full.name, "Video.mp4")
+        self.assertEqual(clipped.name, "Video [00m10s-00m20s].mp4")
+
+    def test_clip_range_suffix_is_not_duplicated_in_filename_stem(self):
+        candidate = {
+            "title": "Video [00m10s-00m20s]",
+            "output_ext": "mp4",
+            "clip_range": {"start": 10, "end": 20},
+        }
+
+        self.assertEqual(engine.filename_stem_for_candidate(candidate), "Video [00m10s-00m20s]")
+
+    def test_existing_full_output_does_not_skip_segment_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            full_path = Path(temp) / "Video.mp4"
+            full_path.write_bytes(b"full")
+            segment = {"title": "Video", "output_ext": "mp4", "clip_range": {"start": 10, "end": 20}}
+
+            self.assertIsNone(engine.existing_output_path_for_candidate(segment, temp))
+
+    def test_candidate_with_clip_range_metadata_updates_title_duration_and_size(self):
+        candidate = {
+            "title": "Video",
+            "display_title": "Video",
+            "duration": 120,
+            "filesize": 1200,
+            "filesize_approx": 0,
+            "sort_bytes": 1200,
+            "clip_range": {"start": 10, "end": 20},
+        }
+
+        prepared = engine.candidate_with_clip_range_metadata(candidate)
+
+        self.assertEqual(prepared["title"], "Video [00m10s-00m20s]")
+        self.assertEqual(prepared["display_title"], "Video [00m10s-00m20s]")
+        self.assertEqual(prepared["duration"], 10)
+        self.assertEqual(prepared["source_duration"], 120)
+        self.assertEqual(prepared["sort_bytes"], 100)
+        self.assertEqual(prepared["filesize"], 100)
+        self.assertEqual(prepared["size_source"], "clip_estimate")
+        self.assertEqual(engine.clip_range_from_candidate(prepared), {"start": 10.0, "end": 20.0})
+
+    def test_candidate_with_clip_range_metadata_handles_start_only_range(self):
+        candidate = {
+            "title": "Video",
+            "display_title": "Video",
+            "duration": 120,
+            "sort_bytes": 1200,
+            "clip_range": {"start": 30, "end": None},
+        }
+
+        prepared = engine.candidate_with_clip_range_metadata(candidate)
+
+        self.assertEqual(prepared["display_title"], "Video [00m30s-end]")
+        self.assertEqual(prepared["duration"], 90)
+        self.assertEqual(prepared["sort_bytes"], 900)
+
+    def test_candidate_with_clip_range_metadata_caps_end_to_known_duration(self):
+        candidate = {
+            "title": "Short",
+            "display_title": "Short",
+            "duration": 15,
+            "sort_bytes": 1500,
+            "clip_range": {"start": 10, "end": 20},
+        }
+
+        prepared = engine.candidate_with_clip_range_metadata(candidate)
+
+        self.assertEqual(prepared["clip_range"], {"start": 10.0, "end": 15.0})
+        self.assertEqual(prepared["display_title"], "Short [00m10s-00m15s]")
+        self.assertEqual(prepared["duration"], 5)
+        self.assertEqual(prepared["sort_bytes"], 500)
+
+    def test_download_options_add_download_ranges_for_clipped_candidate(self):
+        options = engine.build_download_options(
+            {
+                "format_selector": "137+bestaudio[ext=m4a]/bestaudio/best",
+                "output_ext": "mp4",
+                "clip_range": {"start": 10, "end": 20},
+            },
+            "C:/Temp",
+        )
+
+        self.assertIn("download_ranges", options)
+        self.assertFalse(options["force_keyframes_at_cuts"])
+        self.assertIn("ffmpeg", str(options.get("external_downloader") or "").lower())
+        self.assertEqual(Path(options["external_downloader"]).name.lower(), "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg")
+
+    def test_ffmpeg_path_for_yt_dlp_exposes_standard_ffmpeg_name(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "ffmpeg-win-x86_64-v7.1.exe"
+            source.write_bytes(b"fake")
+            cache_dir = Path(temp) / "cache"
+
+            result = Path(engine.ffmpeg_path_for_yt_dlp(str(source), cache_dir=cache_dir))
+
+            self.assertEqual(result.name.lower(), "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg")
+            self.assertTrue(result.exists())
+            self.assertEqual(result.read_bytes(), b"fake")
+
+    def test_download_options_enable_force_keyframes_for_accurate_clip_cut(self):
+        options = engine.build_download_options(
+            {
+                "format_selector": "137+bestaudio[ext=m4a]/bestaudio/best",
+                "output_ext": "mp4",
+                "clip_range": {"start": 10, "end": 20},
+                "clip_cut_mode": "accurate",
+            },
+            "C:/Temp",
+        )
+
+        self.assertTrue(options["force_keyframes_at_cuts"])
+
     def test_download_options_keep_native_hls_progress_for_mp4_manifest(self):
         options = engine.build_download_options(
             {
@@ -1505,6 +1644,236 @@ for line in sys.stdin:
             else:
                 engine.download_direct_media = original_direct
 
+    def test_download_candidate_uses_segment_download_for_clipped_chzzk_mp4_candidates(self):
+        calls = []
+        original_segment = getattr(engine, "download_direct_media_segment", None)
+        original_direct = getattr(engine, "download_direct_media", None)
+
+        class FailingYDL:
+            def __init__(self, options):
+                raise AssertionError("yt-dlp should not run for CHZZK direct MP4 segment candidates")
+
+        def fake_segment(url, candidate, output_dir, on_event=None):
+            calls.append((url, candidate.get("clip_range"), output_dir))
+            output_path = Path(output_dir) / "독케익 - Clip [00m10s-00m20s].mp4"
+            output_path.write_bytes(b"segment")
+            return {"ok": True, "output_dir": output_dir, "output_path": str(output_path), "target_url": url}
+
+        def fake_direct(*args, **kwargs):
+            raise AssertionError("whole direct downloader should not run for clipped candidates")
+
+        try:
+            engine.download_direct_media_segment = fake_segment
+            engine.download_direct_media = fake_direct
+            with tempfile.TemporaryDirectory() as temp:
+                result = engine.download_candidate(
+                    "https://chzzk.naver.com/clips/z0DUTFaKDZ",
+                    {
+                        "url": "https://cdn.example.test/clip.mp4",
+                        "source": "https://chzzk.naver.com/clips/z0DUTFaKDZ",
+                        "format_selector": "best",
+                        "title": "독케익 - Clip",
+                        "output_ext": "mp4",
+                        "ext": "mp4",
+                        "clip_range": {"start": 10, "end": 20},
+                    },
+                    temp,
+                    ydl_factory=FailingYDL,
+                )
+
+            self.assertEqual(calls[0][0], "https://cdn.example.test/clip.mp4")
+            self.assertEqual(calls[0][1], {"start": 10, "end": 20})
+            self.assertTrue(result["output_path"].endswith("[00m10s-00m20s].mp4"))
+        finally:
+            if original_segment is None:
+                delattr(engine, "download_direct_media_segment")
+            else:
+                engine.download_direct_media_segment = original_segment
+            if original_direct is None:
+                delattr(engine, "download_direct_media")
+            else:
+                engine.download_direct_media = original_direct
+
+    def test_download_direct_media_segment_uses_ffmpeg_and_replaces_part_file(self):
+        events = []
+        calls = []
+
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self):
+                self.stdout = iter(["out_time_ms=5000000\n", "progress=continue\n", "out_time_ms=10000000\n", "progress=end\n"])
+
+            def wait(self, timeout=None):
+                del timeout
+                return self.returncode
+
+            def communicate(self, timeout=None):
+                del timeout
+                return "", ""
+
+        def fake_runner(command, **kwargs):
+            calls.append((command, kwargs))
+            Path(command[-1]).write_bytes(b"segment")
+            return FakeProcess()
+
+        with tempfile.TemporaryDirectory() as temp:
+            result = engine.download_direct_media_segment(
+                "https://cdn.example.test/clip.mp4",
+                {
+                    "title": "독케익 - Clip",
+                    "output_ext": "mp4",
+                    "ext": "mp4",
+                    "source": "https://chzzk.naver.com/clips/z0DUTFaKDZ",
+                    "clip_range": {"start": 10, "end": 20},
+                },
+                temp,
+                on_event=events.append,
+                ffmpeg_exe="ffmpeg-test",
+                runner=fake_runner,
+            )
+            self.assertEqual(Path(result["output_path"]).read_bytes(), b"segment")
+            self.assertFalse(Path(result["output_path"] + ".part").exists())
+
+        command = calls[0][0]
+        self.assertIn("-ss", command)
+        self.assertIn("10.0", command)
+        self.assertIn("-t", command)
+        self.assertIn("10.0", command)
+        self.assertIn("-c", command)
+        self.assertEqual(command[command.index("-c") + 1], "copy")
+        self.assertIn("-headers", command)
+        format_index = command.index("-f")
+        self.assertEqual(command[format_index + 1], "mp4")
+        progress_events = [event for event in events if event.get("type") == "progress"]
+        self.assertTrue(progress_events)
+        self.assertEqual(progress_events[-1]["percent"], 100)
+        self.assertTrue(any(event.get("type") == "file" and event.get("path") == result["output_path"] for event in events))
+
+    def test_download_direct_media_segment_accurate_mode_reencodes_for_keyframe_precise_cut(self):
+        calls = []
+
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self):
+                self.stdout = iter(["out_time_ms=10000000\n", "progress=end\n"])
+
+            def wait(self, timeout=None):
+                del timeout
+                return self.returncode
+
+            def communicate(self, timeout=None):
+                del timeout
+                return "", ""
+
+        def fake_runner(command, **kwargs):
+            calls.append(command)
+            Path(command[-1]).write_bytes(b"segment")
+            return FakeProcess()
+
+        with tempfile.TemporaryDirectory() as temp:
+            engine.download_direct_media_segment(
+                "https://cdn.example.test/clip.mp4",
+                {
+                    "title": "Clip",
+                    "output_ext": "mp4",
+                    "source": "https://chzzk.naver.com/clips/z0DUTFaKDZ",
+                    "clip_range": {"start": 10, "end": 20},
+                    "clip_cut_mode": "accurate",
+                },
+                temp,
+                ffmpeg_exe="ffmpeg-test",
+                runner=fake_runner,
+            )
+
+        command = calls[0]
+        self.assertNotEqual(command[command.index("-c:v") + 1], "copy")
+        self.assertIn("libx264", command)
+        self.assertIn("-c:a", command)
+        self.assertIn("aac", command)
+
+    def test_download_direct_media_segment_no_progress_timeout_removes_part_file(self):
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self, part_path):
+                self.stdout = iter([])
+                self.part_path = part_path
+                Path(part_path).write_bytes(b"segment")
+                self.killed = False
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self, timeout=None):
+                del timeout
+                return self.returncode
+
+            def communicate(self, timeout=None):
+                del timeout
+                return "", ""
+
+        processes = []
+
+        def fake_runner(command, **kwargs):
+            del kwargs
+            process = FakeProcess(command[-1])
+            processes.append(process)
+            return process
+
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                engine.download_direct_media_segment(
+                    "https://cdn.example.test/clip.mp4",
+                    {
+                        "title": "Clip",
+                        "output_ext": "mp4",
+                        "source": "https://chzzk.naver.com/clips/z0DUTFaKDZ",
+                        "clip_range": {"start": 10, "end": 20},
+                    },
+                    temp,
+                    ffmpeg_exe="ffmpeg-test",
+                    runner=fake_runner,
+                    no_progress_timeout=0,
+                )
+            self.assertTrue(processes[0].killed)
+            self.assertFalse(any(Path(temp).glob("*.part")))
+
+    def test_download_direct_media_segment_raises_when_ffmpeg_fails(self):
+        class Completed:
+            returncode = 1
+
+            def __init__(self):
+                self.stdout = iter([])
+                self.stderr = "ffmpeg failed"
+
+            def wait(self, timeout=None):
+                del timeout
+                return self.returncode
+
+            def communicate(self, timeout=None):
+                del timeout
+                return "", "ffmpeg failed"
+
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(RuntimeError, "ffmpeg failed"):
+                engine.download_direct_media_segment(
+                    "https://cdn.example.test/clip.mp4",
+                    {
+                        "title": "Clip",
+                        "output_ext": "mp4",
+                        "source": "https://chzzk.naver.com/clips/z0DUTFaKDZ",
+                        "clip_range": {"start": 10, "end": 20},
+                    },
+                    temp,
+                    ffmpeg_exe="ffmpeg-test",
+                    runner=lambda command, **kwargs: Completed(),
+                )
+
     def test_direct_media_download_progress_includes_speed_text(self):
         events = []
         chunks = [b"a" * (512 * 1024), b"b" * (512 * 1024)]
@@ -1549,6 +1918,41 @@ for line in sys.stdin:
         self.assertTrue(progress_events[0].get("speed_text"))
         self.assertIn("/s", progress_events[0]["speed_text"])
         self.assertIn(progress_events[0]["speed_text"], progress_events[0]["message"])
+
+    def test_direct_media_single_rejects_short_download_when_total_is_known(self):
+        original_urlopen = engine.urllib.request.urlopen
+
+        class FakeResponse:
+            headers = {"Content-Length": str(1024 * 1024)}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, size):
+                del size
+                if not hasattr(self, "sent"):
+                    self.sent = True
+                    return b"x" * 128
+                return b""
+
+        try:
+            engine.urllib.request.urlopen = lambda request, timeout=30: FakeResponse()
+            with tempfile.TemporaryDirectory() as temp:
+                candidate = {
+                    "title": "Video",
+                    "output_ext": "mp4",
+                    "ext": "mp4",
+                    "sort_bytes": 1024 * 1024,
+                    "source": "https://chzzk.naver.com/video/1",
+                }
+                with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                    engine.download_direct_media("https://cdn.example.test/video.mp4", candidate, temp)
+                self.assertFalse((Path(temp) / "Video.mp4").exists())
+        finally:
+            engine.urllib.request.urlopen = original_urlopen
 
     def test_large_direct_media_download_uses_parallel_range_requests(self):
         content = bytes((index % 251 for index in range(1024 * 1024)))

@@ -176,7 +176,7 @@ class CustomTooltip(QWidget):
     SHADOW_MARGIN = 12
 
     def __init__(self):
-        super().__init__(None, Qt.ToolTip | Qt.FramelessWindowHint)
+        super().__init__(None, Qt.Tool | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -233,17 +233,20 @@ def show_tooltip_above(widget, text):
     tip = CustomTooltip.instance()
     tip.setText(text)
     tip.adjustSize()
+    tip.show()
+    if tip.layout() is not None:
+        tip.layout().activate()
     origin = widget.mapToGlobal(QPoint(0, 0))
-    x = origin.x() + (widget.width() - tip.width()) // 2
-    y = origin.y() - tip.height() - 2
+    bubble = tip.bubble_geometry()
+    x = origin.x() + widget.width() // 2 - (bubble.x() + bubble.width() // 2)
+    y = origin.y() - bubble.bottom() - 4
     screen = widget.screen()
     if screen is not None:
         available = screen.availableGeometry()
         x = max(available.left() + 4, min(x, available.right() - tip.width() - 4))
         if y < available.top() + 4:
-            y = origin.y() + widget.height() + 2
+            y = origin.y() + widget.height() - bubble.y() + 4
     tip.move(x, y)
-    tip.show()
     tip.raise_()
 
 

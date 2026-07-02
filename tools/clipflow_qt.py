@@ -3,7 +3,7 @@ import sys
 import time
 from collections import OrderedDict, deque
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, QSettings, QSize, Qt, QThread, QTimer, QUrl, Slot
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSettings, QSize, Qt, QThread, QTimer, QUrl, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -30,7 +30,8 @@ try:
         TOP_FIELD_HEIGHT, apply_tracking, configure_app_font, cookie_source_from_display, create_app_icon,
     )
     from tools.clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
-    from tools.clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
+    from tools.clipflow_widgets import CleanComboBox, ClearingUrlInput, ComboPopup, PathDisplayInput, PrimaryActionButton, TimecodeInput
+    from tools.clipflow_rows import build_quality_options
     from tools.clipflow_workers import AnalyzeWorker
     from tools.clipflow_dialogs import DeleteConfirmDialog
     from tools.clipflow_playlist import PlaylistMixin
@@ -48,7 +49,8 @@ except ImportError:
         TOP_FIELD_HEIGHT, apply_tracking, configure_app_font, cookie_source_from_display, create_app_icon,
     )
     from clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
-    from clipflow_widgets import CleanComboBox, ClearingUrlInput, PathDisplayInput, PrimaryActionButton
+    from clipflow_widgets import CleanComboBox, ClearingUrlInput, ComboPopup, PathDisplayInput, PrimaryActionButton, TimecodeInput
+    from clipflow_rows import build_quality_options
     from clipflow_workers import AnalyzeWorker
     from clipflow_dialogs import DeleteConfirmDialog
     from clipflow_playlist import PlaylistMixin
@@ -245,6 +247,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             if event.key() == Qt.Key_Escape:
                 self._set_search_expanded(False)
                 return True
+        if getattr(self, "clip_range_popup", None) is obj and event.type() == event.Type.Hide:
+            self._restore_clip_range_draft_from_applied()
         if hasattr(self, "scroll_area") and obj is self.scroll_area.viewport() and event.type() == event.Type.Resize:
             self._position_playlist_float_button()
             self._refresh_playlist_float_button()
@@ -280,6 +284,38 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             layout.addWidget(trailing_widget)
         return frame
 
+    def _time_field_box(self, line_edit, height=TOP_FIELD_HEIGHT):
+        frame = QFrame()
+        frame.setObjectName("FieldBox")
+        frame.setProperty("timeField", "true")
+        frame.setStyleSheet(
+            "QFrame#FieldBox[timeField=\"true\"] {"
+            f"background: {theme.SURFACE_SOFT}; border: 1px solid {theme.BORDER}; border-radius: 9px;"
+            "}"
+        )
+        frame.setFixedHeight(height)
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(0)
+        line_edit.setObjectName("BareInput")
+        layout.addWidget(line_edit, 1)
+        return frame
+
+    def _build_clip_popup_time_row(self, label_text, line_edit):
+        row_widget = QWidget()
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        label = QLabel(label_text)
+        label.setObjectName("ClipRangeLabel")
+        label.setFixedWidth(58)
+        label.setFixedHeight(36)
+        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        line_edit.setFixedSize(164, 36)
+        row.addWidget(label)
+        row.addWidget(line_edit)
+        return row_widget, label
+
     def _build_input_panel(self):
         panel = self._panel()
         layout = QVBoxLayout(panel)
@@ -288,7 +324,9 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
 
         self.url_input = ClearingUrlInput()
         self.url_input.setPlaceholderText("URL을 입력하세요")
+        self._clip_range_url_text = ""
         self.url_input.textChanged.connect(self._refresh_primary_action)
+        self.url_input.textChanged.connect(self._reset_clip_range_on_url_change)
         self.url_input.clicked_for_edit.connect(self._prepare_url_edit)
         self.url_input.pasted.connect(self._on_url_pasted)
         self.url_input.returnPressed.connect(self._handle_primary_action)
@@ -317,6 +355,42 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.primary_button.setIcon(download_icon)
         self.primary_button.setIconSize(QSize(18, 18))
         self.primary_button.clicked.connect(self._handle_primary_action)
+
+        self.clip_range_button = QPushButton("구간선택")
+        self.clip_range_button.setObjectName("SecondaryButton")
+        self.clip_range_button.setFixedSize(96, TOP_FIELD_HEIGHT)
+        self.clip_range_button.setCursor(Qt.PointingHandCursor)
+        self.clip_range_button.setToolTip("시작/종료 시간을 지정해서 구간만 다운로드")
+        self.clip_range_button.clicked.connect(self._toggle_clip_range_popup)
+
+        self.clip_start_input = TimecodeInput("미설정")
+        start_tooltip = "시작시간이 --이면 처음부터 다운로드합니다."
+        end_tooltip = "종료시간이 --이면 끝까지 다운로드합니다."
+        self.clip_start_input.setToolTip(start_tooltip)
+        self.clip_end_input = TimecodeInput("미설정")
+        self.clip_end_input.setToolTip(end_tooltip)
+        self.clip_start_input.editingComplete.connect(self._focus_clip_end_input)
+        self.clip_start_input.textChanged.connect(self._clear_zero_zero_clip_range)
+        self.clip_end_input.textChanged.connect(self._clear_zero_zero_clip_range)
+        self.clip_start_input.textChanged.connect(self._clear_clip_range_apply_error)
+        self.clip_end_input.textChanged.connect(self._clear_clip_range_apply_error)
+        self._applied_clip_start_text = ""
+        self._applied_clip_end_text = ""
+        self._clip_range_apply_error = ""
+        self.clip_cut_fast = QPushButton("빠른 컷")
+        self.clip_cut_fast.setObjectName("CutModeButton")
+        self.clip_cut_fast.setCheckable(True)
+        self.clip_cut_fast.setChecked(True)
+        self.clip_cut_fast.setCursor(Qt.PointingHandCursor)
+        self.clip_cut_fast.setToolTip("빠르게 자릅니다. 시작점은 키프레임 때문에 조금 밀릴 수 있습니다.")
+        self.clip_cut_accurate = QPushButton("정확 컷")
+        self.clip_cut_accurate.setObjectName("CutModeButton")
+        self.clip_cut_accurate.setCheckable(True)
+        self.clip_cut_accurate.setCursor(Qt.PointingHandCursor)
+        self.clip_cut_accurate.setToolTip("키프레임 밀림 없이 자릅니다. 대신 재인코딩 때문에 느릴 수 있습니다.")
+        self.clip_cut_fast.clicked.connect(lambda: self._set_clip_cut_mode("fast"))
+        self.clip_cut_accurate.clicked.connect(lambda: self._set_clip_cut_mode("accurate"))
+        self._refresh_clip_cut_buttons()
 
         self.folder_input = PathDisplayInput(self._initial_save_folder())
         self.folder_input.editingFinished.connect(self._save_folder_from_input)
@@ -347,6 +421,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         url_row.setContentsMargins(0, 0, 0, 0)
         url_row.setSpacing(12)
         url_row.addWidget(url_field, 1)
+        url_row.addWidget(self.clip_range_button)
         url_row.addWidget(self.primary_button)
 
         options_row = QHBoxLayout()
@@ -437,7 +512,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.preference_button.setObjectName("SecondaryButton")
         self.preference_button.setFixedSize(LIST_TOOL_WIDTH, LIST_TOOL_HEIGHT)
         self.preference_button.setCursor(Qt.PointingHandCursor)
-        self.preference_button.setToolTip("품질/포맷/코덱 설정")
+        self.preference_button.setToolTip("품질/포맷/코덱/병렬 설정")
         self.preference_button.clicked.connect(self._toggle_preferences_popup)
         header.addWidget(self.select_toggle, 0, Qt.AlignVCenter)
         header.addWidget(self.select_actions, 0, Qt.AlignVCenter)
@@ -663,7 +738,340 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         cached_info = self._cached_download_info(key) if key else None
         if cached_info and engine.download_info_reuse_supported(prepared):
             prepared["_download_info"] = cached_info
+        if "clip_range" not in prepared:
+            clip_range = self.current_clip_range()
+            if clip_range:
+                prepared["clip_range"] = clip_range
+                prepared["clip_cut_mode"] = self.clip_cut_mode()
+        if prepared.get("clip_range"):
+            if not prepared.get("clip_cut_mode"):
+                prepared["clip_cut_mode"] = self.clip_cut_mode()
+            prepared = engine.candidate_with_clip_range_metadata(prepared)
         return prepared
+
+    def _time_input_text(self, widget):
+        if hasattr(widget, "normalize_text"):
+            widget.normalize_text()
+        text = widget.text().strip().replace("_", "") if widget else ""
+        return "" if not text.replace(":", "") else text
+
+    def _set_clip_input_texts(self, start_text, end_text):
+        self.clip_start_input.blockSignals(True)
+        self.clip_end_input.blockSignals(True)
+        try:
+            self.clip_start_input.setText(start_text or "")
+            self.clip_end_input.setText(end_text or "")
+        finally:
+            self.clip_start_input.blockSignals(False)
+            self.clip_end_input.blockSignals(False)
+
+    def _position_clip_range_popup(self, popup):
+        popup.adjustSize()
+        popup.setFixedWidth(max(252, popup.sizeHint().width()))
+        popup.adjustSize()
+        anchor = self.clip_range_button.mapToGlobal(QPoint(self.clip_range_button.width(), self.clip_range_button.height() + 6))
+        x = anchor.x() - popup.width()
+        y = anchor.y()
+        screen = QApplication.screenAt(anchor) or self.screen()
+        if screen:
+            available = screen.availableGeometry()
+            x = max(available.left() + 6, min(x, available.right() - popup.width() + 1))
+            y = max(available.top() + 6, min(y, available.bottom() - popup.height() + 1))
+        popup.move(QPoint(x, y))
+
+    def _create_clip_range_popup(self):
+        popup = ComboPopup(self.clip_range_button)
+        popup.setStyleSheet(
+            f"QLabel#ClipRangeLabel {{ color: {theme.MUTED}; font-size: 14px; font-weight: 700; }}"
+            f"QPushButton#SecondaryButton {{"
+            f" background: {theme.SURFACE}; color: {theme.INK}; border: 1px solid {theme.FIELD_BORDER};"
+            " border-radius: 8px; padding: 7px 12px; font-size: 13px; font-weight: 600;"
+            f"}}"
+            f"QPushButton#SecondaryButton:hover {{ background: {theme.SURFACE_SOFT}; border-color: {theme.BORDER_STRONG}; }}"
+            f"QPushButton#CutModeButton {{"
+            f" background: {theme.SURFACE}; color: {theme.INK}; border: 1px solid {theme.FIELD_BORDER};"
+            " border-radius: 8px; padding: 7px 10px; font-size: 13px; font-weight: 700;"
+            f"}}"
+            f"QPushButton#CutModeButton:hover {{ background: {theme.SURFACE_SOFT}; border-color: {theme.BORDER_STRONG}; }}"
+            f"QPushButton#CutModeButton[selected='true'] {{ background: {theme.INK}; color: {theme.ON_ACCENT}; border-color: {theme.INK}; }}"
+        )
+        layout = QVBoxLayout(popup)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        start_row, self.clip_start_label = self._build_clip_popup_time_row("시작시간", self.clip_start_input)
+        end_row, self.clip_end_label = self._build_clip_popup_time_row("종료시간", self.clip_end_input)
+        self.clip_start_label.setToolTip(self.clip_start_input.toolTip())
+        self.clip_end_label.setToolTip(self.clip_end_input.toolTip())
+        layout.addWidget(start_row)
+        layout.addWidget(end_row)
+        cut_row = QWidget()
+        cut_layout = QHBoxLayout(cut_row)
+        cut_layout.setContentsMargins(0, 0, 0, 0)
+        cut_layout.setSpacing(8)
+        cut_label = QLabel("컷 방식")
+        cut_label.setObjectName("ClipRangeLabel")
+        cut_label.setFixedWidth(58)
+        cut_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.clip_cut_fast.setFixedSize(78, 34)
+        self.clip_cut_accurate.setFixedSize(78, 34)
+        cut_layout.addWidget(cut_label)
+        cut_layout.addWidget(self.clip_cut_fast)
+        cut_layout.addWidget(self.clip_cut_accurate)
+        layout.addWidget(cut_row)
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(8)
+        reset_button = QPushButton("초기화")
+        reset_button.setObjectName("SecondaryButton")
+        reset_button.setFixedSize(78, 34)
+        reset_button.setCursor(Qt.PointingHandCursor)
+        reset_button.clicked.connect(self._reset_clip_range_inputs)
+        apply_button = QPushButton("적용")
+        apply_button.setObjectName("PrimaryPopupButton")
+        apply_button.setFixedSize(78, 34)
+        apply_button.setCursor(Qt.PointingHandCursor)
+        apply_button.clicked.connect(self._apply_clip_range_popup)
+        buttons.addStretch(1)
+        buttons.addWidget(reset_button)
+        buttons.addWidget(apply_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        popup.installEventFilter(self)
+        return popup
+
+    def _refresh_clip_cut_buttons(self):
+        if not hasattr(self, "clip_cut_fast"):
+            return
+        for button in (self.clip_cut_fast, self.clip_cut_accurate):
+            button.setProperty("selected", "true" if button.isChecked() else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def _set_clip_cut_mode(self, mode):
+        accurate = str(mode or "").lower() == "accurate"
+        self.clip_cut_fast.blockSignals(True)
+        self.clip_cut_accurate.blockSignals(True)
+        try:
+            self.clip_cut_fast.setChecked(not accurate)
+            self.clip_cut_accurate.setChecked(accurate)
+        finally:
+            self.clip_cut_fast.blockSignals(False)
+            self.clip_cut_accurate.blockSignals(False)
+        self._refresh_clip_cut_buttons()
+
+    def clip_cut_mode(self):
+        return "accurate" if getattr(self, "clip_cut_accurate", None) and self.clip_cut_accurate.isChecked() else "fast"
+
+    def _toggle_clip_range_popup(self):
+        if getattr(self.clip_range_button, "_ignore_next_popup", False):
+            self.clip_range_button._ignore_next_popup = False
+            return
+        popup = getattr(self, "clip_range_popup", None)
+        if popup and popup.isVisible():
+            popup.close()
+            return
+        if popup is None:
+            popup = self._create_clip_range_popup()
+            self.clip_range_popup = popup
+        self._set_clip_input_texts(self._applied_clip_start_text, self._applied_clip_end_text)
+        self._position_clip_range_popup(popup)
+        popup.show()
+
+    def _reset_clip_range_inputs(self):
+        self.clip_start_input.clear()
+        self.clip_end_input.clear()
+
+    def _restore_clip_range_draft_from_applied(self):
+        self._set_clip_input_texts(self._applied_clip_start_text, self._applied_clip_end_text)
+
+    def _focus_clip_end_input(self):
+        def focus_end():
+            self.clip_start_input.clearFocus()
+            self.clip_end_input.setFocus(Qt.TabFocusReason)
+            self.clip_end_input.set_selected_segment(0)
+
+        QTimer.singleShot(0, focus_end)
+
+    def _clear_clip_range_apply_error(self):
+        self._clip_range_apply_error = ""
+
+    def _apply_clip_range_popup(self):
+        start_text = self._time_input_text(self.clip_start_input)
+        end_text = self._time_input_text(self.clip_end_input)
+        try:
+            self._clip_range_from_texts(start_text, end_text)
+        except ValueError as exc:
+            self._clip_range_apply_error = str(exc)
+            self._set_status(self._clip_range_apply_error)
+            return
+        self._clip_range_apply_error = ""
+        if start_text and end_text and self._time_text_is_zero(start_text) and self._time_text_is_zero(end_text):
+            start_text = ""
+            end_text = ""
+            self._set_clip_input_texts("", "")
+        self._applied_clip_start_text = start_text
+        self._applied_clip_end_text = end_text
+        popup = getattr(self, "clip_range_popup", None)
+        if popup:
+            popup.close()
+
+    def _reset_clip_range_on_url_change(self, text):
+        current = str(text or "").strip()
+        if current == self._clip_range_url_text:
+            return
+        self._clip_range_url_text = current
+        if not (self.clip_start_input.text() or self.clip_end_input.text()):
+            self._applied_clip_start_text = ""
+            self._applied_clip_end_text = ""
+            self._clip_range_apply_error = ""
+            return
+        self._applied_clip_start_text = ""
+        self._applied_clip_end_text = ""
+        self._clip_range_apply_error = ""
+        self.clip_start_input.blockSignals(True)
+        self.clip_end_input.blockSignals(True)
+        try:
+            self.clip_start_input.clear()
+            self.clip_end_input.clear()
+        finally:
+            self.clip_start_input.blockSignals(False)
+            self.clip_end_input.blockSignals(False)
+
+    def _time_text_is_zero(self, text):
+        text = (text or "").strip().replace("_", "")
+        if not text or not text.replace(":", ""):
+            return False
+        try:
+            return engine.parse_timecode(text) == 0
+        except ValueError:
+            return False
+
+    def _clear_zero_zero_clip_range(self):
+        start_text = self._time_input_text(getattr(self, "clip_start_input", None))
+        end_text = self._time_input_text(getattr(self, "clip_end_input", None))
+        if not (start_text and end_text):
+            return
+        if not (self._time_text_is_zero(start_text) and self._time_text_is_zero(end_text)):
+            return
+        self.clip_start_input.blockSignals(True)
+        self.clip_end_input.blockSignals(True)
+        try:
+            self.clip_start_input.clear()
+            self.clip_end_input.clear()
+        finally:
+            self.clip_start_input.blockSignals(False)
+            self.clip_end_input.blockSignals(False)
+
+    def _validate_time_input_bounds(self, text):
+        if not text:
+            return
+        parts = text.split(":")
+        if len(parts) == 3:
+            try:
+                hours, minutes, seconds = (int(part or 0) for part in parts)
+            except ValueError as exc:
+                raise ValueError("구간 시간은 숫자로 입력하세요.") from exc
+            if hours > 99 or minutes > 59 or seconds > 59:
+                raise ValueError("구간 시간은 시 99, 분 59, 초 59 이하로 입력하세요.")
+
+    def _clip_range_from_texts(self, start_text, end_text):
+        self._validate_time_input_bounds(start_text)
+        self._validate_time_input_bounds(end_text)
+        if self._time_text_is_zero(start_text) and not end_text:
+            return None
+        if start_text and end_text and self._time_text_is_zero(start_text) and self._time_text_is_zero(end_text):
+            return None
+        return engine.normalize_clip_range(start_text, end_text)
+
+    def current_clip_range(self):
+        if self._clip_range_apply_error:
+            raise ValueError(self._clip_range_apply_error)
+        return self._clip_range_from_texts(self._applied_clip_start_text, self._applied_clip_end_text)
+
+    def _show_clip_range_dialog(self, initial=None):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("구간 다운로드")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(12)
+        start = TimecodeInput("시작시간")
+        end = TimecodeInput("종료시간")
+        initial = initial or {}
+        if initial.get("start") is not None:
+            start_seconds = int(float(initial.get("start") or 0))
+            start.set_time_parts(start_seconds // 3600, (start_seconds % 3600) // 60, start_seconds % 60)
+        if initial.get("end") is not None:
+            end_seconds = int(float(initial.get("end") or 0))
+            end.set_time_parts(end_seconds // 3600, (end_seconds % 3600) // 60, end_seconds % 60)
+        fields = QHBoxLayout()
+        fields.addWidget(self._time_field_box(start))
+        fields.addWidget(self._time_field_box(end))
+        layout.addLayout(fields)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("취소")
+        cancel.setObjectName("SecondaryButton")
+        apply_button = QPushButton("다운로드")
+        buttons.addWidget(cancel)
+        buttons.addWidget(apply_button)
+        layout.addLayout(buttons)
+        cancel.clicked.connect(dialog.reject)
+        apply_button.clicked.connect(dialog.accept)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return engine.normalize_clip_range(self._time_input_text(start), self._time_input_text(end))
+
+    def download_segment_for_row(self, row, clip_range=None):
+        if row not in self.rows:
+            return
+        if row.get("kind") == "playlist" and not row.get("is_playlist_child"):
+            self._set_status("재생목록 부모는 하위 항목에서 구간 다운로드를 선택하세요")
+            return
+        candidate = self.selected_candidate_for_row_ref(row)
+        if not candidate:
+            self._set_status("다운로드할 항목을 선택하세요")
+            return
+        if clip_range is None:
+            try:
+                clip_range = self._show_clip_range_dialog(self.current_clip_range())
+            except ValueError as exc:
+                self._set_status(str(exc))
+                return
+        if not clip_range:
+            return
+        prepared = dict(candidate)
+        prepared["clip_range"] = engine.normalize_clip_range(clip_range.get("start"), clip_range.get("end"))
+        prepared["clip_cut_mode"] = self.clip_cut_mode()
+        prepared = engine.candidate_with_clip_range_metadata(prepared)
+        created_order = self._next_row_sequence()
+        new_row = {
+            "id": f"{row.get('id') or 'row'}-segment-{created_order}",
+            "kind": row.get("kind") or "video",
+            "candidate": prepared,
+            "qualities": [prepared],
+            "quality_options": build_quality_options([prepared]),
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": row.get("analysis_source_url") or row.get("source_url") or prepared.get("source") or "",
+            "source_url": row.get("source_url") or prepared.get("source") or prepared.get("url") or "",
+            "input_url": row.get("input_url") or row.get("source_url") or "",
+            "status": READY_STATUS,
+            "status_detail": "",
+            "progress": 0,
+            "progress_text": "",
+            "output_path": "",
+            "messages": [],
+            "created_order": created_order,
+            "fixed_candidate": True,
+            "parent_playlist_id": row.get("parent_playlist_id") or "",
+            "is_playlist_child": bool(row.get("is_playlist_child")),
+            "playlist_child_index": row.get("playlist_child_index") or 0,
+            "playlist_key": row.get("playlist_key") or "",
+        }
+        insert_at = self.rows.index(row) + 1
+        self.rows.insert(insert_at, new_row)
+        self._render_rows()
+        self.start_download_for_row(new_row)
 
     def _start_analysis(self, auto_download=False):
         if self.analysis_thread and self.analysis_thread.isRunning():
