@@ -1108,10 +1108,12 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     def _progress_text(self, percent, event):
         if isinstance(event, dict):
             speed = str(event.get("speed_text") or "").strip()
+            eta = str(event.get("eta_text") or "").strip()
             if not speed:
                 message = event.get("message") or ""
             else:
-                return f"{percent}% · {speed}"
+                text = f"{percent}% · {speed}"
+                return f"{text} · ETA {eta}" if eta else text
         else:
             message = event
         parts = str(message or "").split()

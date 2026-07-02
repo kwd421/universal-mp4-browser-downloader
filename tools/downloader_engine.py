@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.error
 import urllib.request
 import atexit
+import concurrent.futures
 from pathlib import Path
 
 
@@ -36,6 +37,9 @@ AUDIO_OUTPUT_EXTENSIONS = {"mp3", "wav", "aac"}
 OUTPUT_EXTENSIONS = {"mp4", "webm"} | AUDIO_OUTPUT_EXTENSIONS
 ALL_OUTPUT_EXT = "all"
 SIZE_PROBE_LIMIT = 12
+DIRECT_MEDIA_PARALLEL_THRESHOLD = 64 * 1024 * 1024
+DIRECT_MEDIA_PARALLEL_PART_SIZE = 16 * 1024 * 1024
+DIRECT_MEDIA_PARALLEL_WORKERS = 4
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
     "google chrome": ("chrome",),
@@ -2145,13 +2149,7 @@ def is_chzzk_direct_mp4_candidate(candidate):
     )
 
 
-def download_direct_media(url, candidate, output_dir, on_event=None):
-    output_dir = Path(output_dir).expanduser()
-    output_path = final_output_path_for_candidate(candidate, output_dir)
-    if output_path is None:
-        raise RuntimeError("Direct media output path could not be determined.")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    part_path = output_path.with_name(output_path.name + ".part")
+def direct_media_request_headers(candidate):
     headers = {
         "User-Agent": USER_AGENT,
         "Accept-Language": ACCEPT_LANGUAGE,
@@ -2159,12 +2157,44 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
     source = str((candidate or {}).get("source") or "")
     if source.startswith(("http://", "https://")):
         headers["Referer"] = source
+    return headers
+
+
+def emit_direct_download_progress(on_event, downloaded, total, started_at):
+    if not total:
+        return
+    now = time.monotonic()
+    percent = max(0, min(100, downloaded * 100 / total))
+    elapsed = max(0.001, now - started_at)
+    speed = downloaded / elapsed
+    eta = max(0, int((total - downloaded) / speed)) if speed > 0 else 0
+    speed_text = f"{display_size(speed)}/s"
+    eta_text = display_duration(eta)
+    message = f"{percent:.1f}% {speed_text}"
+    if eta_text:
+        message = f"{message} ETA {eta_text}"
+    emit_event(
+        on_event,
+        "progress",
+        percent=percent,
+        downloaded=downloaded,
+        total=total,
+        speed=speed,
+        eta=eta,
+        speed_text=speed_text,
+        eta_text=eta_text,
+        message=message,
+    )
+
+
+def download_direct_media_single(url, output_path, headers, total=0, on_event=None):
+    part_path = output_path.with_name(output_path.name + ".part")
     request = urllib.request.Request(url, headers=headers)
-    emit_event(on_event, "status", message="Starting direct download")
     downloaded = 0
+    started_at = time.monotonic()
     last_progress = 0.0
     with urllib.request.urlopen(request, timeout=30) as response, part_path.open("wb") as file:
-        total = safe_int(response.headers.get("Content-Length"))
+        total = total or safe_int(response.headers.get("Content-Length"))
         while True:
             chunk = response.read(1024 * 256)
             if not chunk:
@@ -2174,15 +2204,95 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
             now = time.monotonic()
             if total and (now - last_progress >= 0.25 or downloaded >= total):
                 last_progress = now
-                percent = max(0, min(100, downloaded * 100 / total))
-                emit_event(
-                    on_event,
-                    "progress",
-                    percent=percent,
-                    downloaded=downloaded,
-                    total=total,
-                    message=f"{percent:.1f}%",
-                )
+                emit_direct_download_progress(on_event, downloaded, total, started_at)
+    return part_path
+
+
+def direct_media_ranges(total, part_size=None):
+    part_size = max(1, safe_int(part_size or DIRECT_MEDIA_PARALLEL_PART_SIZE))
+    start = 0
+    index = 0
+    while start < total:
+        end = min(total - 1, start + part_size - 1)
+        yield index, start, end
+        index += 1
+        start = end + 1
+
+
+def download_direct_media_parallel(url, output_path, headers, total, on_event=None):
+    part_path = output_path.with_name(output_path.name + ".part")
+    segment_paths = []
+    downloaded = 0
+    downloaded_lock = threading.Lock()
+    progress_lock = threading.Lock()
+    started_at = time.monotonic()
+    last_progress = {"value": 0.0}
+
+    def report(delta):
+        nonlocal downloaded
+        now = time.monotonic()
+        with downloaded_lock:
+            downloaded += delta
+            current = downloaded
+        with progress_lock:
+            if now - last_progress["value"] >= 0.25 or current >= total:
+                last_progress["value"] = now
+                emit_direct_download_progress(on_event, current, total, started_at)
+
+    def download_range(range_info):
+        index, start, end = range_info
+        segment_path = part_path.with_name(f"{part_path.name}.{index}")
+        segment_paths.append(segment_path)
+        range_headers = {**headers, "Range": f"bytes={start}-{end}"}
+        request = urllib.request.Request(url, headers=range_headers)
+        written = 0
+        with urllib.request.urlopen(request, timeout=30) as response, segment_path.open("wb") as file:
+            if safe_int(getattr(response, "status", 206)) != 206:
+                raise RuntimeError("Direct media range request was not honored.")
+            while True:
+                chunk = response.read(1024 * 512)
+                if not chunk:
+                    break
+                file.write(chunk)
+                written += len(chunk)
+                report(len(chunk))
+        expected = end - start + 1
+        if written != expected:
+            raise RuntimeError(f"Direct media range returned {written} bytes, expected {expected}.")
+        return index, segment_path
+
+    ranges = list(direct_media_ranges(total))
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, safe_int(DIRECT_MEDIA_PARALLEL_WORKERS))) as executor:
+            completed = sorted(executor.map(download_range, ranges), key=lambda item: item[0])
+        emit_event(on_event, "status", message="Finalizing direct download")
+        with part_path.open("wb") as output_file:
+            for _index, segment_path in completed:
+                with segment_path.open("rb") as segment_file:
+                    shutil.copyfileobj(segment_file, output_file, 1024 * 1024)
+        return part_path
+    finally:
+        for segment_path in segment_paths:
+            try:
+                segment_path.unlink()
+            except OSError:
+                pass
+
+
+def download_direct_media(url, candidate, output_dir, on_event=None):
+    output_dir = Path(output_dir).expanduser()
+    output_path = final_output_path_for_candidate(candidate, output_dir)
+    if output_path is None:
+        raise RuntimeError("Direct media output path could not be determined.")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    headers = direct_media_request_headers(candidate)
+    total = candidate_expected_size(candidate)
+    use_parallel = total >= DIRECT_MEDIA_PARALLEL_THRESHOLD
+    emit_event(on_event, "status", message="Starting parallel direct download" if use_parallel else "Starting direct download")
+    if use_parallel:
+        part_path = download_direct_media_parallel(url, output_path, headers, total, on_event=on_event)
+    else:
+        part_path = download_direct_media_single(url, output_path, headers, total=total, on_event=on_event)
     part_path.replace(output_path)
     emit_event(on_event, "file", path=str(output_path))
     emit_event(on_event, "done", path=str(output_dir))

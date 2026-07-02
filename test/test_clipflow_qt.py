@@ -3061,6 +3061,20 @@ print(not widget.delete_file_button.isHidden())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["True", "False", "False", "False", "True", "True"])
 
+    def test_clipflow_qt_progress_text_includes_eta_when_available(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+window = ClipFlowWindow()
+print(window._progress_text(12, {"speed_text": "4.0 MB/s", "eta_text": "1:23"}))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["12% · 4.0 MB/s · ETA 1:23"])
+
     def test_clipflow_qt_concurrent_downloads_keep_progress_on_distinct_repeated_analysis_rows(self):
         script = r'''
 import time
