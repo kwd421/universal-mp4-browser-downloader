@@ -437,7 +437,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.preference_button.setObjectName("SecondaryButton")
         self.preference_button.setFixedSize(LIST_TOOL_WIDTH, LIST_TOOL_HEIGHT)
         self.preference_button.setCursor(Qt.PointingHandCursor)
-        self.preference_button.setToolTip("품질/포맷/코덱/프레임 설정")
+        self.preference_button.setToolTip("품질/포맷/코덱 설정")
         self.preference_button.clicked.connect(self._toggle_preferences_popup)
         header.addWidget(self.select_toggle, 0, Qt.AlignVCenter)
         header.addWidget(self.select_actions, 0, Qt.AlignVCenter)

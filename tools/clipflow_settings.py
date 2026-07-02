@@ -39,6 +39,14 @@ except ImportError:
     )
 
 
+PREFERENCE_TOOLTIPS = {
+    "품질": "선택한 해상도 이하에서 가장 좋은 후보를 고릅니다.",
+    "포맷": "저장할 파일 형식입니다. MP3/WAV/AAC는 음원만 저장합니다.",
+    "코덱": "가능하면 선택한 영상 코덱을 우선합니다. 음원 포맷에는 적용되지 않습니다.",
+    "병렬": "동시에 받을 다운로드 개수입니다. 기본값은 3입니다.",
+}
+
+
 def default_save_folder():
     for location in (
         QStandardPaths.MoviesLocation,
@@ -139,22 +147,18 @@ class SettingsMixin:
         format_combo.addItems(["자동", "MP4", "WEBM", "MP3", "WAV", "AAC"])
         codec_combo = CleanComboBox()
         codec_combo.addItems(["자동", "H264", "H265", "AV1", "VP9"])
-        frame_combo = CleanComboBox()
-        frame_combo.addItems(["자동", "60fps", "30fps"])
         concurrency_combo = CleanComboBox()
         concurrency_combo.addItems(["1", "2", "3"])
         concurrency_combo.setCurrentText(str(getattr(self, "download_concurrency", DOWNLOAD_CONCURRENCY)))
-        for combo in (quality_combo, format_combo, codec_combo, frame_combo, concurrency_combo):
+        for combo in (quality_combo, format_combo, codec_combo, concurrency_combo):
             combo.setObjectName("CompactComboBox")
         quality_combo.setCurrentText(preferences.quality)
         format_combo.setCurrentText(preferences.output_format)
         codec_combo.setCurrentText(preferences.codec)
-        frame_combo.setCurrentText(preferences.frame_rate)
 
         def refresh_controls():
             audio_format = format_combo.currentText().strip().lower() in presenter.AUDIO_FORMATS
             codec_combo.setEnabled(not audio_format)
-            frame_combo.setEnabled(not audio_format)
 
         def apply_preferences(*_args):
             refresh_controls()
@@ -162,7 +166,7 @@ class SettingsMixin:
                 quality=_combo_text(quality_combo),
                 output_format=_combo_text(format_combo),
                 codec=_combo_text(codec_combo),
-                frame_rate=_combo_text(frame_combo),
+                frame_rate=PREFERENCE_DEFAULTS["frame_rate"],
             )
 
         for row, (label_text, combo) in enumerate(
@@ -170,12 +174,15 @@ class SettingsMixin:
                 ("품질", quality_combo),
                 ("포맷", format_combo),
                 ("코덱", codec_combo),
-                ("프레임", frame_combo),
                 ("병렬", concurrency_combo),
             )
         ):
             label = QLabel(label_text)
             label.setObjectName("PreferencePopupLabel")
+            tooltip = PREFERENCE_TOOLTIPS.get(label_text, "")
+            if tooltip:
+                label.setToolTip(tooltip)
+                combo.setToolTip(tooltip)
             layout.addWidget(label, row, 0)
             combo.setFixedWidth(140)
             layout.addWidget(combo, row, 1)

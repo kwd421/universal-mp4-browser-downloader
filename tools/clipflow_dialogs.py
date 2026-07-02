@@ -12,6 +12,13 @@ def _combo_text(combo):
     return str(combo.currentText()).strip()
 
 
+PREFERENCE_TOOLTIPS = {
+    "품질": "선택한 해상도 이하에서 가장 좋은 후보를 고릅니다.",
+    "포맷": "저장할 파일 형식입니다. MP3/WAV/AAC는 음원만 저장합니다.",
+    "코덱": "가능하면 선택한 영상 코덱을 우선합니다. 음원 포맷에는 적용되지 않습니다.",
+}
+
+
 class PreferencesDialog(QDialog):
     def __init__(self, preferences, parent=None):
         super().__init__(parent)
@@ -34,13 +41,10 @@ class PreferencesDialog(QDialog):
         self.format_combo.addItems(["자동", "MP4", "WEBM", "MP3", "WAV", "AAC"])
         self.codec_combo = CleanComboBox()
         self.codec_combo.addItems(["자동", "H264", "H265", "AV1", "VP9"])
-        self.frame_combo = CleanComboBox()
-        self.frame_combo.addItems(["자동", "60fps", "30fps"])
 
         self.quality_combo.setCurrentText(preferences.quality)
         self.format_combo.setCurrentText(preferences.output_format)
         self.codec_combo.setCurrentText(preferences.codec)
-        self.frame_combo.setCurrentText(preferences.frame_rate)
         self.format_combo.currentIndexChanged.connect(self.refresh_controls)
 
         for row, (label, combo) in enumerate(
@@ -48,11 +52,14 @@ class PreferencesDialog(QDialog):
                 ("품질", self.quality_combo),
                 ("포맷", self.format_combo),
                 ("코덱", self.codec_combo),
-                ("프레임", self.frame_combo),
             )
         ):
             label_widget = QLabel(label)
             label_widget.setObjectName("MetaText")
+            tooltip = PREFERENCE_TOOLTIPS.get(label, "")
+            if tooltip:
+                label_widget.setToolTip(tooltip)
+                combo.setToolTip(tooltip)
             form.addWidget(label_widget, row, 0)
             form.addWidget(combo, row, 1)
 
@@ -72,14 +79,13 @@ class PreferencesDialog(QDialog):
     def refresh_controls(self):
         audio_format = self.format_combo.currentText().strip().lower() in presenter.AUDIO_FORMATS
         self.codec_combo.setEnabled(not audio_format)
-        self.frame_combo.setEnabled(not audio_format)
 
     def preferences(self):
         return presenter.DownloadPreferences(
             quality=_combo_text(self.quality_combo),
             output_format=_combo_text(self.format_combo),
             codec=_combo_text(self.codec_combo),
-            frame_rate=_combo_text(self.frame_combo),
+            frame_rate="자동",
         )
 
 

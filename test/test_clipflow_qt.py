@@ -350,6 +350,9 @@ print(bool(popup and popup.isVisible()))
 print(len(combos))
 print(window.preference_button.text())
 print("병렬" in labels)
+print("프레임" in labels)
+print(all(combo.toolTip() for combo in combos))
+print(all(label.toolTip() for label in popup.findChildren(QLabel) if label.text() in {"품질", "포맷", "코덱", "병렬"}))
 print(combos[-1].currentText())
 button_right = window.preference_button.mapToGlobal(QPoint(window.preference_button.width(), 0)).x()
 print(abs(popup.geometry().right() - button_right) <= 1)
@@ -368,7 +371,7 @@ print(window.preferences_popup is None)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["True", "5", "옵션", "True", "3", "True", "720p", "WEBM", "2", "True"],
+            ["True", "4", "옵션", "True", "False", "True", "True", "3", "True", "720p", "WEBM", "2", "True"],
         )
 
     def test_clipflow_qt_audio_format_disables_codec_and_frame_preferences(self):
@@ -382,17 +385,20 @@ dialog = window._create_preferences_dialog()
 dialog.format_combo.setCurrentText("MP3")
 dialog.refresh_controls()
 print(dialog.codec_combo.isEnabled())
-print(dialog.frame_combo.isEnabled())
+print(hasattr(dialog, "frame_combo"))
+print(bool(dialog.quality_combo.toolTip()))
+print(bool(dialog.format_combo.toolTip()))
+print(bool(dialog.codec_combo.toolTip()))
 dialog.format_combo.setCurrentText("MP4")
 dialog.refresh_controls()
 print(dialog.codec_combo.isEnabled())
-print(dialog.frame_combo.isEnabled())
+print(dialog.preferences().frame_rate)
 print(window.cookie_combo.maximumWidth() <= 142)
 '''
         result = run_qt_script(script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["False", "False", "True", "True", "True"])
+        self.assertEqual(result.stdout.splitlines(), ["False", "False", "True", "True", "True", "True", "자동", "True"])
 
     def test_clipflow_qt_extract_audio_converts_existing_file_without_redownloading(self):
         script = r'''
