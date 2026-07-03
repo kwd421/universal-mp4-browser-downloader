@@ -1560,6 +1560,146 @@ for line in sys.stdin:
         self.assertEqual(result["title"], "Rendered Video")
         self.assertTrue(result["candidates"][0]["is_manifest"])
 
+    def test_browser_dom_media_definitions_site_metadata_matches_page(self):
+        html = """
+        <html><head>
+          <meta name="twitter:title" content="Seductive Indian beauty strips down and fingers her pink pussy">
+          <meta property="og:video:duration" content="361">
+        </head><body>
+        <h1 class="title">Seductive Indian beauty strips down and fingers her pink pussy</h1>
+        <div>From:&nbsp;<a href="/users/babes-com"><span class="username">BABES-COM</span></a></div>
+        <script>
+        var flashvars_123 = {"video_duration":361,"mediaDefinitions":[
+          {"height":720,"width":1280,"format":"hls","videoUrl":"https:\\/\\/cdn.example.test\\/720\\/master.m3u8","quality":"720"},
+          {"height":480,"width":854,"format":"mp4","videoUrl":"https:\\/\\/cdn.example.test\\/480\\/video.mp4","quality":"480","filesize":52428800}
+        ]};
+        </script></body></html>
+        """
+
+        result = engine.analyze_browser_dom_media(
+            "https://www.example-stream.test/view_video.php?viewkey=demo123",
+            html,
+            output_ext="MP4",
+        )
+        best_mp4 = next(candidate for candidate in result["candidates"] if candidate["height"] == 480)
+
+        self.assertEqual(result["title"], "BABES-COM - Seductive Indian beauty strips down and fingers her pink pussy")
+        self.assertEqual(best_mp4["display_title"], result["title"])
+        self.assertEqual(best_mp4["uploader"], "BABES-COM")
+        self.assertEqual(best_mp4["duration"], 361)
+        self.assertEqual(best_mp4["sort_bytes"], 52_428_800)
+        self.assertEqual(best_mp4["size_source"], "metadata")
+        self.assertEqual(
+            engine.final_output_path_for_candidate(best_mp4, "/tmp/downloads").name,
+            "BABES-COM - Seductive Indian beauty strips down and fingers her pink pussy.mp4",
+        )
+
+    def test_browser_dom_xvideos_player_script_metadata_matches_page(self):
+        html = """
+        <html><head>
+          <title>A Beautiful Red-Haired Stranger - XVIDEOS.COM</title>
+          <meta property="video:duration" content="1238">
+          <meta name="description" content="File Size: 70.00 MB">
+        </head><body>
+        <span class="duration">20:38</span>
+        <a href="/profiles/demo-creator">Demo Creator</a>
+        <script>
+          html5player.setVideoTitle('A Beautiful Red-Haired Stranger Was Refused, But Still Came To My Room For Sex');
+          html5player.setVideoUrlLow('https://mp4.example.test/path/video_240p.mp4');
+          html5player.setVideoUrlHigh('https://mp4.example.test/path/video_360p.mp4?bytes=73400320');
+          html5player.setVideoHLS('https://hls.example.test/path/hls.m3u8');
+          html5player.setThumbUrl('https://thumb.example.test/thumb.jpg');
+        </script></body></html>
+        """
+
+        result = engine.analyze_browser_dom_media(
+            "https://www.example-stream.test/video.demo123/example",
+            html,
+            output_ext="MP4",
+        )
+        best_mp4 = result["candidates"][0]
+
+        self.assertEqual(
+            result["title"],
+            "Demo Creator - A Beautiful Red-Haired Stranger Was Refused, But Still Came To My Room For Sex",
+        )
+        self.assertEqual(best_mp4["duration"], 1238)
+        self.assertEqual(best_mp4["height"], 360)
+        self.assertEqual(engine.display_duration(best_mp4["duration"]), "20:38")
+        self.assertEqual(best_mp4["sort_bytes"], 73_400_320)
+        self.assertEqual(best_mp4["size_source"], "metadata")
+
+    def test_browser_dom_xhamster_initials_metadata_matches_page(self):
+        html = """
+        <html><head><title>FemaleAgent Shy beauty takes the bait - xHamster.com</title></head><body>
+        <script>
+        window.initials = {
+          "videoModel": {
+            "title": "FemaleAgent Shy beauty takes the bait",
+            "duration": 893,
+            "thumbURL": "https://thumb.example.test/xh.jpg",
+            "author": {"name": "Ruseful2011", "pageURL": "https://example-stream.test/users/ruseful2011"},
+            "sources": {
+              "standard": {
+                "720p": "https://cdn.example.test/xh-720p.mp4",
+                "480p": "https://cdn.example.test/xh-480p.mp4"
+              },
+              "download": {
+                "720p": {"size": 94371840},
+                "480p": {"size": 47185920}
+              }
+            }
+          }
+        };
+        </script></body></html>
+        """
+
+        result = engine.analyze_browser_dom_media(
+            "https://example-stream.test/videos/femaleagent-shy-beauty-takes-the-bait-1509445",
+            html,
+            output_ext="MP4",
+        )
+        best = result["candidates"][0]
+
+        self.assertEqual(result["title"], "Ruseful2011 - FemaleAgent Shy beauty takes the bait")
+        self.assertEqual(best["display_title"], result["title"])
+        self.assertEqual(best["uploader"], "Ruseful2011")
+        self.assertEqual(best["duration"], 893)
+        self.assertEqual(best["sort_bytes"], 94_371_840)
+        self.assertEqual(engine.display_duration(best["duration"]), "14:53")
+        self.assertEqual(best["thumbnail"], "https://thumb.example.test/xh.jpg")
+
+    def test_analyze_url_browser_fallback_keeps_site_title_duration_and_uploader(self):
+        class ResetYoutubeDL(FakeYoutubeDL):
+            def extract_info(self, url, download=False):
+                raise RuntimeError("ConnectionResetError forcibly closed")
+
+        html = """
+        <html><head>
+          <meta name="twitter:title" content="Weekend Vlog">
+          <meta property="og:video:duration" content="245">
+        </head><body>
+        <div>From:&nbsp;<a href="/users/demo-creator"><span class="username">Demo Creator</span></a></div>
+        <script>
+        var flashvars_1 = {"video_duration":245,"mediaDefinitions":[
+          {"height":1080,"format":"mp4","videoUrl":"https:\\/\\/cdn.example.test\\/1080\\/video.mp4","quality":"1080","filesize":104857600}
+        ]};
+        </script></body></html>
+        """
+
+        result = engine.analyze_url(
+            "https://www.example-stream.test/view_video.php?viewkey=weekend",
+            ydl_factory=ResetYoutubeDL,
+            browser_dom_fetcher=lambda url, on_event=None: html,
+        )
+
+        candidate = result["candidates"][0]
+        self.assertEqual(result["source"], "browser-dom")
+        self.assertEqual(result["title"], "Demo Creator - Weekend Vlog")
+        self.assertEqual(candidate["duration"], 245)
+        self.assertEqual(candidate["sort_bytes"], 104_857_600)
+        self.assertEqual(candidate["uploader"], "Demo Creator")
+
     def test_chzzk_clip_uid_is_detected(self):
         self.assertEqual(
             engine.find_chzzk_clip_uid("https://chzzk.naver.com/clips/qwr3h4r3Yn"),

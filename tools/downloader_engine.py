@@ -1888,6 +1888,20 @@ def extract_json_array_after(text, marker):
     start = text.find("[", idx)
     if start < 0:
         return None
+    return _extract_balanced_json_fragment(text, start, "[", "]")
+
+
+def extract_json_object_after(text, marker):
+    idx = text.find(marker)
+    if idx < 0:
+        return None
+    start = text.find("{", idx)
+    if start < 0:
+        return None
+    return _extract_balanced_json_fragment(text, start, "{", "}")
+
+
+def _extract_balanced_json_fragment(text, start, open_char, close_char):
     depth = 0
     in_string = False
     escaped = False
@@ -1903,13 +1917,57 @@ def extract_json_array_after(text, marker):
             continue
         if char == '"':
             in_string = True
-        elif char == "[":
+        elif char == open_char:
             depth += 1
-        elif char == "]":
+        elif char == close_char:
             depth -= 1
             if depth == 0:
                 return text[start : index + 1]
     return None
+
+
+def _parse_embedded_json_object(raw):
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def embedded_script_objects_from_html(dom):
+    text = html_lib.unescape(str(dom or ""))
+    objects = {}
+    markers = (
+        ("flashvars", ("flashvars",)),
+        ("model_profile", ("MODEL_PROFILE",)),
+        ("initials", ("window.initials",)),
+    )
+    for key, names in markers:
+        for name in names:
+            idx = 0
+            while True:
+                idx = text.find(name, idx)
+                if idx < 0:
+                    break
+                brace = text.find("{", idx)
+                if brace < 0:
+                    idx += len(name)
+                    continue
+                parsed = _parse_embedded_json_object(_extract_balanced_json_fragment(text, brace, "{", "}"))
+                if parsed:
+                    objects[key] = parsed
+                    break
+                idx += len(name)
+    sources_match = re.search(r"sources\s*:\s*(\{)", text)
+    if sources_match:
+        parsed = _parse_embedded_json_object(
+            _extract_balanced_json_fragment(text, sources_match.start(1), "{", "}")
+        )
+        if parsed:
+            objects["sources_map"] = parsed
+    return objects
 
 
 def media_definitions_from_html(dom):
@@ -1956,6 +2014,59 @@ def player_script_media_from_html(dom):
     return items
 
 
+def script_map_media_from_html(dom, base_url):
+    objects = embedded_script_objects_from_html(dom)
+    items = []
+    initials = objects.get("initials") or {}
+    video_model = initials.get("videoModel") if isinstance(initials.get("videoModel"), dict) else {}
+    sources = video_model.get("sources") if isinstance(video_model.get("sources"), dict) else {}
+    duration = safe_int(video_model.get("duration"))
+    poster = str(video_model.get("thumbURL") or "")
+    download_sizes = {}
+    download_sources = sources.get("download") if isinstance(sources.get("download"), dict) else {}
+    for quality, format_dict in download_sources.items():
+        if isinstance(format_dict, dict):
+            download_sizes[str(quality)] = safe_int(format_dict.get("size"))
+    for source_kind, formats_dict in sources.items():
+        if source_kind == "download" or not isinstance(formats_dict, dict):
+            continue
+        for quality, format_url in formats_dict.items():
+            media_url = str(format_url or "").strip()
+            if not media_url.startswith(("http://", "https://")):
+                continue
+            absolute_url = urllib.parse.urljoin(base_url, media_url)
+            height = height_from_media_url(str(quality)) or height_from_media_url(absolute_url)
+            size = download_sizes.get(str(quality), 0)
+            items.append(
+                {
+                    "videoUrl": absolute_url,
+                    "format": str(source_kind),
+                    "quality": quality,
+                    "height": height,
+                    "duration": duration,
+                    "filesize": size,
+                    "poster": poster,
+                    "source": "page-script",
+                }
+            )
+    for quality, format_url in (objects.get("sources_map") or {}).items():
+        media_url = str(format_url or "").strip()
+        if not media_url.startswith(("http://", "https://")):
+            continue
+        absolute_url = urllib.parse.urljoin(base_url, media_url)
+        height = height_from_media_url(str(quality)) or height_from_media_url(absolute_url)
+        items.append(
+            {
+                "videoUrl": absolute_url,
+                "format": "mp4",
+                "quality": quality,
+                "height": height,
+                "source": "page-script",
+            }
+        )
+    return items
+
+
 def first_html_match(dom, patterns):
     text = str(dom or "")
     for pattern in patterns:
@@ -1966,7 +2077,58 @@ def first_html_match(dom, patterns):
 
 
 def title_from_browser_dom(dom):
-    return clean_video_title(first_html_match(dom, [r"<title[^>]*>(.*?)</title>"])) or "Browser video"
+    objects = embedded_script_objects_from_html(dom)
+    flashvars = objects.get("flashvars") or {}
+    initials = objects.get("initials") or {}
+    video_model = initials.get("videoModel") if isinstance(initials.get("videoModel"), dict) else {}
+    for title in (
+        first_html_match(
+            dom,
+            [
+                r'<meta[^>]+name=["\']twitter:title["\'][^>]+content=["\']([^"\']+)["\']',
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:title["\']',
+                r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']',
+            ],
+        ),
+        first_html_match(dom, [r'<h1[^>]+class=["\']title["\'][^>]*>(.+?)</h1>']),
+        first_html_match(dom, [r'data-video-title=(?:["\'])([^"\']+)(?:["\'])']),
+        first_html_match(dom, [r'shareTitle["\']\s*[=:]\s*(?:["\'])([^"\']+)(?:["\'])']),
+        first_html_match(dom, [r'setVideoTitle\s*\(\s*(?:["\'])([^"\']+)(?:["\'])']),
+        clean_video_title(video_model.get("title")),
+        clean_video_title(flashvars.get("video_title")),
+        clean_video_title(first_html_match(dom, [r"<title[^>]*>(.*?)</title>"])),
+    ):
+        if title:
+            return title
+    return "Browser video"
+
+
+def uploader_from_browser_dom(dom):
+    objects = embedded_script_objects_from_html(dom)
+    model_profile = objects.get("model_profile") or {}
+    initials = objects.get("initials") or {}
+    video_model = initials.get("videoModel") if isinstance(initials.get("videoModel"), dict) else {}
+    author = video_model.get("author") if isinstance(video_model.get("author"), dict) else {}
+    for name in (
+        clean_video_title(model_profile.get("username")),
+        clean_video_title(author.get("name")),
+        first_html_match(
+            dom,
+            [
+                r'itemprop=["\']author["\'][^>]*><a[^>]+><span[^>]+>([^<]+)',
+                r'From:&nbsp;.+?<(?:a|span)\b[^>]+>([^<]+)<',
+                r'href=["\']/(?:profiles|users|channels|model|pornstar)/[^"\']+["\'][^>]*>([^<]+)<',
+            ],
+        ),
+    ):
+        if name and name.casefold() not in {"anonymous", "unknown"}:
+            return name
+    return ""
+
+
+def display_title_from_browser_dom(dom):
+    return prefix_title_with_uploader(title_from_browser_dom(dom), uploader_from_browser_dom(dom))
 
 
 def thumbnail_from_browser_dom(dom):
@@ -1982,11 +2144,37 @@ def thumbnail_from_browser_dom(dom):
 
 
 def duration_from_browser_dom(dom):
+    objects = embedded_script_objects_from_html(dom)
+    flashvars = objects.get("flashvars") or {}
+    initials = objects.get("initials") or {}
+    video_model = initials.get("videoModel") if isinstance(initials.get("videoModel"), dict) else {}
+    for value in (
+        flashvars.get("video_duration"),
+        video_model.get("duration"),
+        first_html_match(
+            dom,
+            [
+                r'<meta[^>]+property=["\']og:video:duration["\'][^>]+content=["\'](\d+)["\']',
+                r'<meta[^>]+content=["\'](\d+)["\'][^>]+property=["\']og:video:duration["\']',
+                r'<meta[^>]+property=["\']video:duration["\'][^>]+content=["\'](\d+)["\']',
+                r'<meta[^>]+content=["\'](\d+)["\'][^>]+property=["\']video:duration["\']',
+            ],
+        ),
+        first_html_match(dom, [r'<span[^>]+class=["\']duration["\'][^>]*>.*?(\d[^<]+)']),
+        first_html_match(
+            dom,
+            [
+                r'itemprop=["\']duration["\'][^>]+content=["\']([^"\']+)["\']',
+                r'content=["\']([^"\']+)["\'][^>]+itemprop=["\']duration["\']',
+            ],
+        ),
+    ):
+        seconds = seconds_from_duration_value(value)
+        if seconds:
+            return seconds
     text = compact_text(html_lib.unescape(str(dom or "")), limit=20000)
     patterns = [
         r"(?:video\s*)?duration\s*[:：]\s*(\d{1,2}:\d{2}(?::\d{2})?)",
-        r'<meta[^>]+property=["\']og:video:duration["\'][^>]+content=["\'](\d+)["\']',
-        r'<meta[^>]+content=["\'](\d+)["\'][^>]+property=["\']og:video:duration["\']',
     ]
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
@@ -2069,14 +2257,21 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
         raise RuntimeError("Browser DOM fallback does not expose audio-only candidates.")
     if requested_ext == ALL_OUTPUT_EXT:
         requested_ext = None
-    title = title_from_browser_dom(dom)
+    title = display_title_from_browser_dom(dom)
+    uploader = uploader_from_browser_dom(dom)
     thumbnail = thumbnail_from_browser_dom(dom)
     fallback_duration = duration_from_browser_dom(dom)
+    fallback_size = size_from_browser_dom(dom)
     parsed = urllib.parse.urlsplit(url)
     origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
     candidates = []
     seen = set()
-    for item in [*media_definitions_from_html(dom), *player_script_media_from_html(dom), *generic_video_media_from_html(dom, url)]:
+    for item in [
+        *media_definitions_from_html(dom),
+        *player_script_media_from_html(dom),
+        *generic_video_media_from_html(dom, url),
+        *script_map_media_from_html(dom, url),
+    ]:
         media_url = item.get("videoUrl") or item.get("url")
         if not media_url:
             continue
@@ -2101,7 +2296,7 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
         format_label = item.get("format") or source
         quality = item.get("quality") or ""
         duration = safe_int(item.get("duration") or fallback_duration)
-        size = safe_int(item.get("filesize") or item.get("filesize_approx"))
+        size = safe_int(item.get("filesize") or item.get("filesize_approx") or fallback_size)
         size_source = "metadata" if size else "unknown"
         filesize, filesize_approx = candidate_filesize_fields({"filesize": size, "url": media_url}, size, size_source)
         format_id_label = f"browser-{height}" if height else f"browser-{format_label}"
@@ -2113,6 +2308,7 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
                 "url": media_url,
                 "title": title,
                 "display_title": title,
+                "uploader": uploader,
                 "thumbnail": item.get("poster") or thumbnail,
                 "duration": duration,
                 "ext": requested_ext or ext,
