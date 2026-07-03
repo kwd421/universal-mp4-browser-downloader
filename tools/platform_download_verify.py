@@ -12,11 +12,41 @@ PLATFORMS = [
     ("instagram", "https://www.instagram.com/reel/C5-rS1Xr0ZU/", "yt-dlp"),
     ("vimeo", "https://vimeo.com/76979871", "yt-dlp"),
     ("tiktok", "https://www.tiktok.com/@scout2015/video/6718339390849673477", "yt-dlp"),
-    ("pornhub", "https://www.pornhub.com/view_video.php?viewkey=ph63c8f4fcf2759", "dom"),
-    ("xvideos", "https://www.xvideos.com/video.kufktcv4e8e/_", "dom"),
-    ("redtube", "https://www.redtube.com/1717561", "dom"),
-    ("xhamster", "https://www.xhamster.com/videos/femaleagent-shy-beauty-takes-the-bait-1509445", "dom"),
+    ("pornhub", "https://www.pornhub.com/view_video.php?viewkey=6861453eadd37", "dom"),
+    ("xvideos", "https://www.xvideos.com/video.klvdubb4d47/49079845/0/full_version_https_bit.ly_36cjbb4", "dom"),
+    ("redtube", "https://www.redtube.com/198689351", "dom"),
+    ("xhamster", "https://xhamster.com/videos/femaleagent-shy-beauty-takes-the-bait-1509445", "dom"),
 ]
+
+
+def pick_verify_candidate(candidates, expected_path="yt-dlp"):
+    candidates = list(candidates or [])
+    if not candidates:
+        return None
+    if expected_path != "dom":
+        for candidate in candidates:
+            if safe_int(candidate.get("height")) > 0 and str(candidate.get("ext") or "mp4").lower() == "mp4":
+                return candidate
+        return candidates[0]
+    direct_mp4 = [
+        candidate
+        for candidate in candidates
+        if not candidate.get("is_manifest")
+        and str(candidate.get("url") or "").lower().startswith(("http://", "https://"))
+    ]
+    if direct_mp4:
+        return min(
+            direct_mp4,
+            key=lambda candidate: (
+                safe_int(candidate.get("sort_bytes")) or 10**18,
+                safe_int(candidate.get("height")) or 9999,
+            ),
+        )
+    return candidates[-1]
+
+
+def safe_int(value):
+    return engine.safe_int(value)
 
 
 def verify_platform(name, url, expected_path, out_root):
@@ -46,7 +76,9 @@ def verify_platform(name, url, expected_path, out_root):
         row["candidate_count"] = len(candidates)
         if not candidates:
             raise RuntimeError("No candidates returned from analysis.")
-        candidate = candidates[0]
+        candidate = pick_verify_candidate(candidates, expected_path)
+        if not candidate:
+            raise RuntimeError("No downloadable candidate could be selected.")
         out_dir = out_root / name / str(int(time.time() * 1000))
         out_dir.mkdir(parents=True, exist_ok=True)
         before = time.time()

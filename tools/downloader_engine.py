@@ -2489,6 +2489,214 @@ def generic_video_media_from_html(dom, base_url):
     return items
 
 
+def absolute_browser_media_url(media_url, page_url):
+    media_url = html_lib.unescape(str(media_url or "")).replace("\\/", "/").strip()
+    if not media_url:
+        return ""
+    if media_url.startswith(("http://", "https://")):
+        return media_url
+    return urllib.parse.urljoin(str(page_url or ""), media_url)
+
+
+def is_browser_remote_media_api_url(media_url):
+    lower = str(media_url or "").lower()
+    if not lower:
+        return False
+    if "/video/get_media" in lower or "/media/mp4" in lower or "/media/hls" in lower:
+        return True
+    parsed = urllib.parse.urlparse(lower)
+    return parsed.path.rstrip("/") in {"/video/get_media", "/media/mp4", "/media/hls"}
+
+
+def json_text_from_browser_dump(dom):
+    text = clean_browser_dom(dom)
+    match = re.search(r"<pre[^>]*>(.*)</pre>", text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        return html_lib.unescape(match.group(1)).strip()
+    stripped = text.strip()
+    if stripped.startswith(("{", "[")):
+        return stripped
+    return ""
+
+
+def needs_browser_profile_for_remote_media(media_url):
+    lower = str(media_url or "").lower()
+    return "pornhub.com/video/get_media" in lower or ("pornhub.com" in lower and "/get_media" in lower)
+
+
+def _browser_dump_dom_base_args(browser, profile_dir=None):
+    args = [
+        browser,
+        "--headless=new",
+        "--disable-gpu",
+        "--no-first-run",
+        "--disable-extensions",
+        "--disable-blink-features=AutomationControlled",
+        "--virtual-time-budget=20000",
+    ]
+    if profile_dir:
+        args.append(f"--user-data-dir={profile_dir}")
+    else:
+        args.append("--incognito")
+    return args
+
+
+def _run_browser_dump_dom_command(command, timeout=45):
+    startupinfo = None
+    creationflags = 0
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        startupinfo=startupinfo,
+        creationflags=creationflags,
+    )
+    if completed.returncode != 0 and not (completed.stdout or "").strip():
+        raise RuntimeError((completed.stderr or "Browser dump-dom failed.").strip())
+    return completed.stdout or ""
+
+
+def _browser_remote_media_payload_from_dom(dom):
+    raw = json_text_from_browser_dump(dom)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Browser remote media resolution returned invalid JSON.") from exc
+
+
+def _browser_remote_media_payload_is_empty(payload):
+    if payload is None:
+        return True
+    if isinstance(payload, list):
+        return not payload
+    if isinstance(payload, dict):
+        return not payload
+    return True
+
+
+def fetch_json_via_browser(media_url, page_url=None, on_event=None, timeout=45):
+    browser = find_browser_executable()
+    if not browser:
+        raise RuntimeError("Chrome/Edge browser was not found for remote media resolution.")
+    media_url = absolute_browser_media_url(media_url, page_url)
+    if not media_url.startswith(("http://", "https://")):
+        raise RuntimeError(f"Remote media URL is invalid: {media_url}")
+    emit_event(on_event, "status", message="브라우저로 미디어 URL 확인 중")
+
+    def load_payload(profile_dir=None, include_page_prime=False):
+        profile_timeout = max(timeout, 90) if profile_dir else timeout
+        commands = []
+        if include_page_prime and page_url and profile_dir:
+            commands.append([*_browser_dump_dom_base_args(browser, profile_dir), "--dump-dom", str(page_url)])
+        commands.append([*_browser_dump_dom_base_args(browser, profile_dir), "--dump-dom", media_url])
+        dom = ""
+        for index, command in enumerate(commands):
+            command_timeout = profile_timeout if profile_dir and index == 0 and include_page_prime else timeout
+            try:
+                dom = _run_browser_dump_dom_command(command, timeout=command_timeout)
+            except subprocess.TimeoutExpired as exc:
+                if profile_dir and index == 0 and include_page_prime:
+                    continue
+                raise RuntimeError("Browser remote media resolution timed out.") from exc
+        return _browser_remote_media_payload_from_dom(dom)
+
+    payload = load_payload()
+    if _browser_remote_media_payload_is_empty(payload) and needs_browser_profile_for_remote_media(media_url):
+        profile_dir = tempfile.mkdtemp(prefix="clipflow-browser-profile-")
+        try:
+            payload = load_payload(profile_dir=profile_dir, include_page_prime=True)
+        finally:
+            shutil.rmtree(profile_dir, ignore_errors=True)
+    if payload is None:
+        raise RuntimeError("Browser remote media resolution returned an empty response.")
+    if _browser_remote_media_payload_is_empty(payload):
+        raise RuntimeError("Browser remote media resolution returned no playable entries.")
+    return payload
+
+
+def expand_browser_remote_media_entries(items, page_url, on_event=None):
+    expanded = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        media_url = absolute_browser_media_url(item.get("videoUrl") or item.get("url"), page_url)
+        item_format = str(item.get("format") or "").lower()
+        is_remote = bool(item.get("remote")) or is_browser_remote_media_api_url(media_url)
+        if is_remote and media_url:
+            try:
+                payload = fetch_json_via_browser(media_url, page_url=page_url, on_event=on_event)
+            except Exception:
+                continue
+            entries = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                entry_url = absolute_browser_media_url(entry.get("videoUrl") or entry.get("url"), page_url)
+                if not entry_url:
+                    continue
+                merged = dict(item)
+                merged.update(entry)
+                merged["videoUrl"] = entry_url
+                merged["remote"] = False
+                merged["source"] = item.get("source") or "remote-media"
+                expanded.append(merged)
+            continue
+        if media_url:
+            merged = dict(item)
+            merged["videoUrl"] = media_url
+            expanded.append(merged)
+    return expanded
+
+
+def prepare_browser_dom_candidate(page_url, candidate, on_event=None):
+    candidate = dict(candidate or {})
+    if not str(candidate.get("format_id") or "").startswith("browser-"):
+        return candidate
+    media_url = absolute_browser_media_url(candidate.get("url"), page_url)
+    if not is_browser_remote_media_api_url(media_url):
+        if media_url and media_url != candidate.get("url"):
+            candidate["url"] = media_url
+        return candidate
+    payload = fetch_json_via_browser(media_url, page_url=page_url, on_event=on_event)
+    entries = payload if isinstance(payload, list) else ([payload] if isinstance(payload, dict) else [])
+    if not entries:
+        raise RuntimeError("Browser remote media resolution returned no playable entries.")
+    target_height = safe_int(candidate.get("height"))
+    picked = None
+    if target_height:
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if safe_int(entry.get("quality") or entry.get("height")) == target_height:
+                picked = entry
+                break
+    if not picked:
+        picked = min(
+            (entry for entry in entries if isinstance(entry, dict)),
+            key=lambda entry: safe_int(entry.get("quality") or entry.get("height") or 9999),
+            default=None,
+        )
+    if not picked:
+        raise RuntimeError("Browser remote media resolution returned no playable entries.")
+    fresh_url = absolute_browser_media_url(picked.get("videoUrl") or picked.get("url"), page_url)
+    if not fresh_url:
+        raise RuntimeError("Browser remote media resolution returned an empty media URL.")
+    candidate["url"] = fresh_url
+    candidate["height"] = safe_int(picked.get("height") or picked.get("quality") or candidate.get("height"))
+    candidate["is_manifest"] = ".m3u8" in fresh_url.lower() or ".mpd" in fresh_url.lower()
+    candidate["protocol"] = "m3u8" if ".m3u8" in fresh_url.lower() else ("dash" if ".mpd" in fresh_url.lower() else "https")
+    return candidate
+
+
 def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
     requested_ext = normalized_output_ext(output_ext)
     if requested_ext in AUDIO_OUTPUT_EXTENSIONS:
@@ -2513,11 +2721,18 @@ def analyze_browser_dom_media(url, dom, output_ext=None, on_event=None):
         media_url = item.get("videoUrl") or item.get("url")
         if not media_url:
             continue
-        media_url = html_lib.unescape(str(media_url)).replace("\\/", "/")
+        media_url = absolute_browser_media_url(media_url, url)
         lower_url = media_url.lower()
-        is_hls = ".m3u8" in lower_url or str(item.get("format") or "").lower() == "hls"
-        is_dash = ".mpd" in lower_url
-        is_mp4 = ".mp4" in lower_url or is_hls
+        item_format = str(item.get("format") or "").lower()
+        is_hls = ".m3u8" in lower_url or item_format == "hls" or "/media/hls" in lower_url
+        is_dash = ".mpd" in lower_url or item_format == "dash"
+        is_mp4 = (
+            ".mp4" in lower_url
+            or "/media/mp4" in lower_url
+            or "/video/get_media" in lower_url
+            or item_format == "mp4"
+            or is_hls
+        )
         if requested_ext and requested_ext not in {"mp4", "webm"}:
             continue
         if requested_ext == "webm" and "webm" not in lower_url:
@@ -3466,6 +3681,8 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
     remove_too_small_existing_output(candidate, output_dir, on_event=on_event)
 
     target_url = candidate.get("source") or page_url or candidate.get("url")
+    if str((candidate or {}).get("format_id") or "").startswith("browser-"):
+        candidate = prepare_browser_dom_candidate(page_url or target_url, candidate, on_event=on_event)
     if candidate.get("format_selector") == "best" and candidate.get("url"):
         target_url = candidate["url"]
     if is_chzzk_direct_mp4_candidate(candidate):

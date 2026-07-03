@@ -1705,6 +1705,65 @@ for line in sys.stdin:
             )
         )
 
+    def test_is_browser_remote_media_api_url_detects_site_media_endpoints(self):
+        self.assertTrue(engine.is_browser_remote_media_api_url("https://www.redtube.com/media/mp4?s=abc"))
+        self.assertTrue(engine.is_browser_remote_media_api_url("https://www.pornhub.com/video/get_media?s=abc"))
+        self.assertFalse(engine.is_browser_remote_media_api_url("https://cdn.example.test/video.mp4"))
+
+    def test_expand_browser_remote_media_entries_resolves_api_payload(self):
+        items = [
+            {
+                "format": "mp4",
+                "videoUrl": "/media/mp4?s=token",
+                "remote": True,
+            }
+        ]
+        payload = [
+            {"format": "mp4", "quality": "480", "videoUrl": "https://cdn.example.test/480.mp4"},
+            {"format": "mp4", "quality": "720", "videoUrl": "https://cdn.example.test/720.mp4"},
+        ]
+
+        with mock.patch.object(engine, "fetch_json_via_browser", return_value=payload):
+            expanded = engine.expand_browser_remote_media_entries(items, "https://www.redtube.com/123")
+
+        self.assertEqual(len(expanded), 2)
+        self.assertEqual(expanded[0]["videoUrl"], "https://cdn.example.test/480.mp4")
+        self.assertEqual(expanded[1]["quality"], "720")
+
+    def test_analyze_browser_dom_media_includes_remote_mp4_api_candidates(self):
+        html = """
+        <html><head><title>Remote API Video</title></head><body>
+        <script>
+        var flashvars = {"mediaDefinitions":[
+          {"format":"mp4","videoUrl":"/media/mp4?s=token","remote":true},
+          {"format":"hls","videoUrl":"/media/hls?s=token","remote":true}
+        ]};
+        </script></body></html>
+        """
+
+        result = engine.analyze_browser_dom_media("https://www.redtube.com/198689351", html)
+
+        self.assertEqual(result["candidates"][0]["url"], "https://www.redtube.com/media/mp4?s=token")
+        self.assertFalse(result["candidates"][0]["is_manifest"])
+
+    def test_prepare_browser_dom_candidate_resolves_remote_api_url(self):
+        candidate = {
+            "format_id": "browser-480",
+            "url": "https://www.redtube.com/media/mp4?s=token",
+            "height": 480,
+            "source": "https://www.redtube.com/198689351",
+        }
+        payload = [
+            {"quality": "480", "videoUrl": "https://cdn.example.test/480.mp4"},
+            {"quality": "720", "videoUrl": "https://cdn.example.test/720.mp4"},
+        ]
+
+        with mock.patch.object(engine, "fetch_json_via_browser", return_value=payload):
+            prepared = engine.prepare_browser_dom_candidate("https://www.redtube.com/198689351", candidate)
+
+        self.assertEqual(prepared["url"], "https://cdn.example.test/480.mp4")
+        self.assertFalse(prepared["is_manifest"])
+
     def test_browser_dom_download_pipeline_writes_file(self):
         sample_mp4 = "https://filesamples.com/samples/video/mp4/sample_640x360.mp4"
         html = f"""
