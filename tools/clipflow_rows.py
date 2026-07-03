@@ -667,23 +667,45 @@ class DownloadRowWidget(QFrame):
         return self._ring_segment_path(rect, float(self._analysis_ring_offset or 0.0), 0.46)
 
     def _ring_segment_path(self, rect, start_phase, length_phase):
+        # Exact perimeter segment: straight edges as lines, corners as true
+        # arcs, and no subpath break when the phase wraps 4.0 -> 0.0 (the
+        # top-left corner) — the ring is continuous there.
         path = QPainterPath()
         length_phase = max(0.0, min(4.0, float(length_phase or 0.0)))
         if length_phase <= 0.0:
             return path
-        samples = max(4, int(18 * length_phase))
+        radius = min(10.0, rect.width() / 2.0, rect.height() / 2.0)
+        straight_fraction = 0.82
+        corner_span = 1.0 - straight_fraction
+        diameter = 2.0 * radius
+        corner_rects = (
+            QRectF(rect.right() - diameter, rect.top(), diameter, diameter),
+            QRectF(rect.right() - diameter, rect.bottom() - diameter, diameter, diameter),
+            QRectF(rect.left(), rect.bottom() - diameter, diameter, diameter),
+            QRectF(rect.left(), rect.top(), diameter, diameter),
+        )
+        corner_start_angles = (90.0, 0.0, 270.0, 180.0)
         start = float(start_phase or 0.0) % 4.0
-        for index in range(samples + 1):
-            phase = (start + length_phase * index / samples) % 4.0
-            point = self._analysis_ring_point(rect, phase)
-            if index == 0:
-                path.moveTo(point)
+        end = start + length_phase
+        path.moveTo(self._analysis_ring_point(rect, start))
+        phase = start
+        while phase < end - 1e-6:
+            base = math.floor(phase + 1e-9)
+            side = int(base) % 4
+            t = phase - base
+            if t < straight_fraction - 1e-9:
+                piece_end = min(end, base + straight_fraction)
+                path.lineTo(self._analysis_ring_point(rect, piece_end % 4.0))
             else:
-                previous_phase = (start + length_phase * (index - 1) / samples) % 4.0
-                if previous_phase > phase:
-                    path.moveTo(point)
-                else:
-                    path.lineTo(point)
+                piece_end = min(end, base + 1.0)
+                from_t = max(0.0, (t - straight_fraction) / corner_span)
+                to_t = min(1.0, (piece_end - base - straight_fraction) / corner_span)
+                path.arcTo(
+                    corner_rects[side],
+                    corner_start_angles[side] - 90.0 * from_t,
+                    -90.0 * (to_t - from_t),
+                )
+            phase = piece_end
         return path
 
     def set_status(self, status, detail=""):
