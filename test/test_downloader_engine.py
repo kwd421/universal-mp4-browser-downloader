@@ -294,7 +294,10 @@ class DownloaderEngineTests(unittest.TestCase):
 
     def test_cookie_source_maps_to_yt_dlp_options(self):
         self.assertNotIn("cookiesfrombrowser", engine.build_ydl_options(cookie_source="없음"))
-        self.assertEqual(engine.build_ydl_options(cookie_source="Chrome")["cookiesfrombrowser"], ("chrome",))
+        self.assertEqual(
+            engine.build_ydl_options(cookie_source="Chrome")["cookiesfrombrowser"],
+            engine.cookiesfrombrowser_spec("Chrome"),
+        )
         self.assertEqual(engine.build_ydl_options(cookie_source="Edge")["cookiesfrombrowser"], ("edge",))
         self.assertEqual(engine.build_ydl_options(cookie_source="Firefox")["cookiesfrombrowser"], ("firefox",))
 
@@ -337,7 +340,7 @@ class DownloaderEngineTests(unittest.TestCase):
         self.assertEqual(options["format"], "137+bestaudio[ext=m4a]/bestaudio/best")
         self.assertEqual(options["merge_output_format"], "mp4")
         self.assertEqual(options["final_ext"], "mp4")
-        self.assertEqual(options["cookiesfrombrowser"], ("chrome",))
+        self.assertEqual(options["cookiesfrombrowser"], engine.cookiesfrombrowser_spec("Chrome"))
         self.assertEqual(options["proxy"], "http://127.0.0.1:8080")
 
     def test_parse_timecode_accepts_seconds_minutes_and_hours(self):
@@ -613,7 +616,7 @@ class DownloaderEngineTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(calls, [("chrome",), None])
+        self.assertEqual(calls, [engine.cookiesfrombrowser_spec("Chrome"), None])
         self.assertTrue(any("쿠키 없이 다시 시도" in event.get("message", "") for event in events))
 
     def test_download_candidate_uses_analyzed_info_without_reextracting_url(self):
@@ -1394,7 +1397,7 @@ for line in sys.stdin:
 
         self.assertEqual(result["title"], "Sample Video")
         self.assertIn("쿠키 읽기 실패", result["warnings"][0])
-        self.assertEqual(FakeYoutubeDL.calls[0]["cookiesfrombrowser"], ("chrome",))
+        self.assertEqual(FakeYoutubeDL.calls[0]["cookiesfrombrowser"], engine.cookiesfrombrowser_spec("Chrome"))
         self.assertNotIn("cookiesfrombrowser", FakeYoutubeDL.calls[1])
 
     def test_browser_dom_media_definitions_extracts_hls_candidates(self):

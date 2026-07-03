@@ -276,6 +276,17 @@ def cookie_spec(cookie_source):
     return COOKIE_SOURCES.get(source)
 
 
+def cookiesfrombrowser_spec(cookie_source):
+    spec = cookie_spec(cookie_source)
+    if not spec:
+        return None
+    browser_key = spec[0]
+    profiles = browser_cookie_profile_dirs(browser_key)
+    if len(profiles) == 1:
+        return (browser_key, profiles[0].name)
+    return spec
+
+
 def browser_cookie_error(exc):
     text = str(exc or "").lower()
     return (
@@ -300,6 +311,53 @@ def should_retry_with_browser_cookies(message):
     ) or ("cookies" in lower and "authentication" in lower)
 
 
+def browser_cookie_profile_dirs(browser_key):
+    home = Path.home()
+    mapping = {
+        "chrome": home / "Library/Application Support/Google/Chrome",
+        "chromium": home / "Library/Application Support/Chromium",
+        "edge": home / "Library/Application Support/Microsoft Edge",
+        "brave": home / "Library/Application Support/BraveSoftware/Brave-Browser",
+        "opera": home / "Library/Application Support/com.operasoftware.Opera",
+        "vivaldi": home / "Library/Application Support/Vivaldi",
+        "firefox": home / "Library/Application Support/Firefox/Profiles",
+        "safari": home / "Library/Cookies",
+    }
+    if os.name == "nt":
+        local = Path(os.environ.get("LOCALAPPDATA") or "")
+        mapping = {
+            "chrome": local / "Google/Chrome/User Data",
+            "chromium": local / "Chromium/User Data",
+            "edge": local / "Microsoft/Edge/User Data",
+            "brave": local / "BraveSoftware/Brave-Browser/User Data",
+            "opera": local / "Opera Software/Opera Stable",
+            "vivaldi": local / "Vivaldi/User Data",
+            "firefox": Path(os.environ.get("APPDATA") or "") / "Mozilla/Firefox/Profiles",
+            "safari": None,
+        }
+    base = mapping.get(str(browser_key or "").strip().lower())
+    if not base:
+        return []
+    if browser_key == "firefox":
+        if not base.exists():
+            return []
+        return [path for path in base.glob("*") if path.is_dir()]
+    if browser_key == "safari":
+        cookie_file = base / "Cookies.binarycookies"
+        return [base] if cookie_file.exists() else []
+    if not base.exists():
+        return []
+    profiles = [path for path in base.glob("Profile *") if (path / "Cookies").exists()]
+    default = base / "Default"
+    if (default / "Cookies").exists():
+        profiles.insert(0, default)
+    return profiles
+
+
+def browser_cookie_db_available(browser_key):
+    return bool(browser_cookie_profile_dirs(browser_key))
+
+
 def browser_cookie_sources_for_retry(preferred=None):
     order = []
     preferred_key = str(preferred or "").strip().lower()
@@ -308,7 +366,7 @@ def browser_cookie_sources_for_retry(preferred=None):
     for key in ("chrome", "chromium", "edge", "brave", "firefox", "safari", "opera", "vivaldi"):
         if key not in order:
             order.append(key)
-    return order
+    return [key for key in order if browser_cookie_db_available(key)]
 
 
 def normalize_proxy_url(proxy_url):
@@ -394,6 +452,8 @@ def classify_error(message):
             "tls connect error",
         ]
     ):
+        return "브라우저 지문/TLS 차단 가능성"
+    if "451" in lower or "unavailable for legal reasons" in lower:
         return "브라우저 지문/TLS 차단 가능성"
     if any(token in lower for token in ["login", "private", "forbidden", "unauthorized", "401", "403"]):
         return "로그인/권한 필요"
@@ -1785,7 +1845,7 @@ def build_ydl_options(cookie_source="없음", on_event=None, quiet=True, proxy_u
         },
         "logger": EventLogger(on_event),
     }
-    spec = cookie_spec(cookie_source)
+    spec = cookiesfrombrowser_spec(cookie_source)
     if spec:
         options["cookiesfrombrowser"] = spec
     proxy = effective_proxy_url(proxy_url)
@@ -2008,9 +2068,7 @@ def fetch_dom_for_fallback(url, on_event=None, timeout=90):
         urllib_failed_fast = True
     if dom_html_looks_usable(html):
         return html
-    if html and len(html) > 200:
-        raise RuntimeError("Browser DOM fallback page has no media entries.")
-    chrome_timeout = 35 if urllib_failed_fast else timeout
+    chrome_timeout = 35 if urllib_failed_fast or (html and len(html) > 200) else timeout
     return dump_dom_with_browser(url, on_event=on_event, timeout=chrome_timeout)
 
 
@@ -2019,23 +2077,25 @@ def dump_dom_with_browser(url, on_event=None, timeout=90):
     if not browser:
         raise RuntimeError("Chrome/Edge browser was not found for browser DOM fallback.")
     emit_event(on_event, "status", message="브라우저 DOM 분석 중")
-    with tempfile.TemporaryDirectory(prefix="ump4-browser-") as profile_dir:
-        command = [
-            browser,
-            "--headless=new",
-            "--disable-gpu",
-            "--no-first-run",
-            "--disable-extensions",
-            f"--user-data-dir={profile_dir}",
-            "--dump-dom",
-            url,
-        ]
-        startupinfo = None
-        creationflags = 0
-        if os.name == "nt":
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    command = [
+        browser,
+        "--headless=new",
+        "--disable-gpu",
+        "--no-first-run",
+        "--disable-extensions",
+        "--incognito",
+        "--disable-blink-features=AutomationControlled",
+        "--virtual-time-budget=20000",
+        "--dump-dom",
+        url,
+    ]
+    startupinfo = None
+    creationflags = 0
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
         completed = subprocess.run(
             command,
             capture_output=True,
@@ -2046,6 +2106,11 @@ def dump_dom_with_browser(url, on_event=None, timeout=90):
             startupinfo=startupinfo,
             creationflags=creationflags,
         )
+    except subprocess.TimeoutExpired as exc:
+        dom = clean_browser_dom(exc.stdout or "")
+        if dom_html_looks_usable(dom):
+            return dom
+        raise RuntimeError(f"Browser DOM fallback timed out after {timeout} seconds") from exc
     dom = clean_browser_dom(completed.stdout)
     if completed.returncode != 0 and not dom:
         raise RuntimeError((completed.stderr or "Browser DOM fallback failed.").strip())
@@ -2763,22 +2828,6 @@ def analyze_url(
                 info = extract_with(cookie_source, impersonate=True)
             except Exception as retry_exc:
                 pending_error = retry_exc
-        elif cookie_spec(cookie_source):
-            warning = "쿠키 읽기 실패, 쿠키 없이 재시도 가능: " + str(exc)
-            warnings.append(warning)
-            emit_event(on_event, "log", message=warning)
-            try:
-                info = extract_with("없음")
-            except Exception as retry_exc:
-                pending_error = retry_exc
-                if should_retry_with_impersonation(str(retry_exc)) and chrome_impersonation_target():
-                    warning = "브라우저 지문/TLS 차단 가능성, Chrome 방식으로 재시도: " + str(retry_exc)
-                    warnings.append(warning)
-                    emit_event(on_event, "log", message=warning)
-                    try:
-                        info = extract_with("없음", impersonate=True)
-                    except Exception as impersonate_exc:
-                        pending_error = impersonate_exc
         elif should_retry_with_browser_cookies(str(exc)):
             original_error = exc
             for browser_source in browser_cookie_sources_for_retry(cookie_source):
@@ -2802,6 +2851,22 @@ def analyze_url(
                                 continue
             if info is None:
                 pending_error = original_error
+        elif cookie_spec(cookie_source) and browser_cookie_error(exc):
+            warning = "쿠키 읽기 실패, 쿠키 없이 재시도 가능: " + str(exc)
+            warnings.append(warning)
+            emit_event(on_event, "log", message=warning)
+            try:
+                info = extract_with("없음")
+            except Exception as retry_exc:
+                pending_error = retry_exc
+                if should_retry_with_impersonation(str(retry_exc)) and chrome_impersonation_target():
+                    warning = "브라우저 지문/TLS 차단 가능성, Chrome 방식으로 재시도: " + str(retry_exc)
+                    warnings.append(warning)
+                    emit_event(on_event, "log", message=warning)
+                    try:
+                        info = extract_with("없음", impersonate=True)
+                    except Exception as impersonate_exc:
+                        pending_error = impersonate_exc
 
     if info is None:
         if pending_error and should_try_browser_dom_fallback(str(pending_error)):
