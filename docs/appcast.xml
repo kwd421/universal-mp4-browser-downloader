@@ -3,15 +3,15 @@
     <channel>
         <title>ClipFlow</title>
         <item>
-            <title>0.1.1</title>
-            <pubDate>Thu, 02 Jul 2026 23:45:40 +0900</pubDate>
+            <title>1.0.2</title>
+            <pubDate>Fri, 03 Jul 2026 12:12:48 +0900</pubDate>
             <link>https://github.com/kwd421/universal-mp4-browser-downloader</link>
-            <sparkle:version>2</sparkle:version>
-            <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+            <sparkle:version>102</sparkle:version>
+            <sparkle:shortVersionString>1.0.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>10.13</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <sparkle:releaseNotesLink>https://kwd421.github.io/universal-mp4-browser-downloader/ClipFlow-0.1.1.md</sparkle:releaseNotesLink>
-            <enclosure url="https://github.com/kwd421/universal-mp4-browser-downloader/releases/download/v0.1.1/ClipFlow-0.1.1.zip" length="71966257" type="application/octet-stream" sparkle:edSignature="er3KT+KpQmV18sz4Rvhw373WJPE/lp5T+6rTuICKWWe5L0PmTjmjX3CuhKbkKfLJaKOi0lF/5Q8uU2OcFT4/Dw=="/>
+            <sparkle:releaseNotesLink>https://kwd421.github.io/universal-mp4-browser-downloader/ClipFlow-1.0.2.md</sparkle:releaseNotesLink>
+            <enclosure url="https://github.com/kwd421/universal-mp4-browser-downloader/releases/download/v1.0.2/ClipFlow-1.0.2.zip" length="71969251" type="application/octet-stream" sparkle:edSignature="tWOC9iqwK+Gj8ybuYj8CZOMpb1AiBA2KNIwsT8O51AHMRNgs2VxeOUNlk5yM5gqS/HIl+gA+GrJ8Dp+peXjzBA=="/>
         </item>
     </channel>
 </rss>
