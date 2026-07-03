@@ -48,6 +48,7 @@ DIRECT_MEDIA_SEGMENT_NO_PROGRESS_TIMEOUT = 30.0
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
     "google chrome": ("chrome",),
+    "chromium": ("chromium",),
     "edge": ("edge",),
     "microsoft edge": ("edge",),
     "firefox": ("firefox",),
@@ -67,11 +68,87 @@ _FFMPEG_PATH_UNSET = object()
 _FFMPEG_PATH = _FFMPEG_PATH_UNSET
 
 
+def curl_resolve_entries_for_hostname(hostname, port):
+    import socket
+
+    host = str(hostname or "").strip()
+    if not host or host in {"localhost", "127.0.0.1", "::1"}:
+        return []
+    port = safe_int(port)
+    if not (1 <= port <= 65535):
+        return []
+    entries = []
+    seen = set()
+    try:
+        for _, _, _, _, sockaddr in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+            ip = str(sockaddr[0] or "")
+            if not ip or "%" in ip:
+                continue
+            entry = f"{host}:{port}:{ip}"
+            if entry in seen:
+                continue
+            seen.add(entry)
+            entries.append(entry)
+    except OSError:
+        return []
+    return entries
+
+
+def curl_resolve_entries_for_url(url):
+    from urllib.parse import urlparse
+
+    parsed = urlparse(str(url or ""))
+    host = parsed.hostname
+    if not host:
+        return []
+    if parsed.port:
+        port = parsed.port
+    elif parsed.scheme == "http":
+        port = 80
+    else:
+        port = 443
+    return curl_resolve_entries_for_hostname(host, port)
+
+
+def apply_curl_cffi_system_dns_patch():
+    try:
+        from curl_cffi.const import CurlOpt
+        from yt_dlp.networking import _curlcffi as curlcffi_mod
+    except ImportError:
+        return False
+
+    original_send = curlcffi_mod.CurlCFFIRH._send
+    if getattr(original_send, "_ump4_system_dns_patched", False):
+        return True
+
+    def _send_with_system_dns(self, request):
+        entries = curl_resolve_entries_for_url(request.url)
+        if not entries:
+            return original_send(self, request)
+        original_get_instance = self._get_instance
+
+        def get_instance_with_system_dns(*args, **kwargs):
+            session = original_get_instance(*args, **kwargs)
+            session.curl.setopt(CurlOpt.RESOLVE, entries)
+            return session
+
+        self._get_instance = get_instance_with_system_dns
+        try:
+            return original_send(self, request)
+        finally:
+            self._get_instance = original_get_instance
+
+    _send_with_system_dns._ump4_system_dns_patched = True
+    curlcffi_mod.CurlCFFIRH._send = _send_with_system_dns
+    return True
+
+
 def youtube_dl_factory():
     global _YOUTUBE_DL_FACTORY
     if _YOUTUBE_DL_FACTORY is None:
         from yt_dlp import YoutubeDL
 
+        apply_curl_cffi_system_dns_patch()
         _YOUTUBE_DL_FACTORY = YoutubeDL
     return _YOUTUBE_DL_FACTORY
 
@@ -205,8 +282,33 @@ def browser_cookie_error(exc):
         "failed to decrypt with dpapi" in text
         or "could not decrypt" in text and "cookie" in text
         or "could not copy chrome cookie database" in text
+        or "could not find" in text and "cookies database" in text
         or "browser cookies" in text and "decrypt" in text
     )
+
+
+def should_retry_with_browser_cookies(message):
+    lower = str(message or "").lower()
+    return any(
+        token in lower
+        for token in (
+            "empty media response",
+            "instagram api is not granting access",
+            "use --cookies-from-browser",
+            "login required",
+        )
+    ) or ("cookies" in lower and "authentication" in lower)
+
+
+def browser_cookie_sources_for_retry(preferred=None):
+    order = []
+    preferred_key = str(preferred or "").strip().lower()
+    if preferred_key and preferred_key not in {"none", "no", "없음"} and preferred_key in COOKIE_SOURCES:
+        order.append(preferred_key)
+    for key in ("chrome", "chromium", "edge", "brave", "firefox", "safari", "opera", "vivaldi"):
+        if key not in order:
+            order.append(key)
+    return order
 
 
 def normalize_proxy_url(proxy_url):
@@ -278,7 +380,20 @@ def classify_error(message):
     lower = str(message or "").lower()
     if "drm" in lower or "encrypted" in lower:
         return "DRM 가능성"
-    if any(token in lower for token in ["connectionreseterror", "connection was reset", "curl: (35)", "forcibly closed"]):
+    if any(
+        token in lower
+        for token in [
+            "connectionreseterror",
+            "connection was reset",
+            "curl: (35)",
+            "forcibly closed",
+            "ssl: unexpected_eof",
+            "unexpected_eof_while_reading",
+            "ssl_connect",
+            "ssl error",
+            "tls connect error",
+        ]
+    ):
         return "브라우저 지문/TLS 차단 가능성"
     if any(token in lower for token in ["login", "private", "forbidden", "unauthorized", "401", "403"]):
         return "로그인/권한 필요"
@@ -1323,6 +1438,11 @@ def should_retry_with_impersonation(message):
 
 
 def should_try_browser_dom_fallback(message):
+    lower = str(message or "").lower()
+    if "ip address is blocked" in lower or "your ip address is blocked" in lower:
+        return False
+    if classify_error(message) == "로그인/권한 필요":
+        return False
     return classify_error(message) in {
         "브라우저 지문/TLS 차단 가능성",
         "지원되지 않는 스트림",
@@ -1839,6 +1959,59 @@ def clean_browser_dom(dom):
     if starts:
         text = text[min(starts) :]
     return text
+
+
+def dom_html_looks_usable(html):
+    text = str(html or "")
+    if len(text) < 500:
+        return False
+    markers = (
+        "mediaDefinitions",
+        "setVideoHLS",
+        "setVideoUrl",
+        "window.initials",
+        "flashvars",
+        "<video",
+    )
+    lower = text.lower()
+    return any(marker.lower() in lower for marker in markers)
+
+
+def fetch_dom_html_with_urllib(url, timeout=20):
+    request = urllib.request.Request(
+        str(url or ""),
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept-Language": ACCEPT_LANGUAGE,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code not in {403, 451, 503}:
+            raise
+        body = exc.read()
+    if not body:
+        return ""
+    return clean_browser_dom(body.decode("utf-8", errors="replace"))
+
+
+def fetch_dom_for_fallback(url, on_event=None, timeout=90):
+    emit_event(on_event, "status", message="페이지 HTML 분석 중")
+    urllib_failed_fast = False
+    try:
+        html = fetch_dom_html_with_urllib(url, timeout=min(20, timeout))
+    except (OSError, urllib.error.URLError, ValueError, TimeoutError):
+        html = ""
+        urllib_failed_fast = True
+    if dom_html_looks_usable(html):
+        return html
+    if html and len(html) > 200:
+        raise RuntimeError("Browser DOM fallback page has no media entries.")
+    chrome_timeout = 35 if urllib_failed_fast else timeout
+    return dump_dom_with_browser(url, on_event=on_event, timeout=chrome_timeout)
 
 
 def dump_dom_with_browser(url, on_event=None, timeout=90):
@@ -2563,7 +2736,7 @@ def analyze_url(
 
     def try_browser_dom_fallback(reason):
         try:
-            fetcher = browser_dom_fetcher or dump_dom_with_browser
+            fetcher = browser_dom_fetcher or fetch_dom_for_fallback
             dom = fetcher(analysis_url, on_event=on_event)
             result = analyze_browser_dom_media(analysis_url, dom, output_ext=output_ext, on_event=on_event)
             warning = "브라우저 DOM fallback 사용: " + str(reason)
@@ -2606,6 +2779,29 @@ def analyze_url(
                         info = extract_with("없음", impersonate=True)
                     except Exception as impersonate_exc:
                         pending_error = impersonate_exc
+        elif should_retry_with_browser_cookies(str(exc)):
+            original_error = exc
+            for browser_source in browser_cookie_sources_for_retry(cookie_source):
+                warning = f"브라우저 쿠키로 재시도 ({browser_source}): " + str(exc)
+                warnings.append(warning)
+                emit_event(on_event, "log", message=warning)
+                try:
+                    info = extract_with(browser_source)
+                    break
+                except Exception as retry_exc:
+                    pending_error = retry_exc
+                    if browser_cookie_error(retry_exc):
+                        continue
+                    if should_retry_with_impersonation(str(retry_exc)) and chrome_impersonation_target():
+                        try:
+                            info = extract_with(browser_source, impersonate=True)
+                            break
+                        except Exception as impersonate_exc:
+                            pending_error = impersonate_exc
+                            if browser_cookie_error(impersonate_exc):
+                                continue
+            if info is None:
+                pending_error = original_error
 
     if info is None:
         if pending_error and should_try_browser_dom_fallback(str(pending_error)):
@@ -2640,6 +2836,20 @@ def analyze_url(
     }
     emit_playlist_analysis_events(result, on_event=on_event)
     return result
+
+
+def is_direct_https_mp4_candidate(candidate):
+    format_id = str((candidate or {}).get("format_id") or "")
+    if not format_id.startswith("browser-"):
+        return False
+    if (candidate or {}).get("is_manifest"):
+        return False
+    media_url = str((candidate or {}).get("url") or "").lower()
+    if not media_url.startswith(("http://", "https://")):
+        return False
+    if ".m3u8" in media_url or ".mpd" in media_url:
+        return False
+    return media_url.endswith(".mp4") or ".mp4?" in media_url or ".mp4&" in media_url
 
 
 def is_chzzk_direct_mp4_candidate(candidate):
@@ -3196,6 +3406,8 @@ def download_candidate(page_url, candidate, output_dir, cookie_source="없음", 
     if is_chzzk_direct_mp4_candidate(candidate):
         if clip_range_from_candidate(candidate):
             return download_direct_media_segment(target_url, candidate, output_dir, on_event=on_event)
+        return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
+    if is_direct_https_mp4_candidate(candidate):
         return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
 
     if ydl_factory is None:

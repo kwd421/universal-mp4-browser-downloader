@@ -7,6 +7,7 @@ import unittest
 import tempfile
 import sys
 from pathlib import Path
+from unittest import mock
 
 from tools import downloader_engine as engine
 from tools import clipflow_analysis_process
@@ -1668,6 +1669,68 @@ for line in sys.stdin:
         self.assertEqual(best["sort_bytes"], 94_371_840)
         self.assertEqual(engine.display_duration(best["duration"]), "14:53")
         self.assertEqual(best["thumbnail"], "https://thumb.example.test/xh.jpg")
+
+    def test_curl_resolve_entries_for_url_uses_system_dns(self):
+        with mock.patch("socket.getaddrinfo", return_value=[(None, None, None, None, ("162.159.138.60", 0))]):
+            self.assertEqual(
+                engine.curl_resolve_entries_for_url("https://vimeo.com/watch"),
+                ["vimeo.com:443:162.159.138.60"],
+            )
+
+    def test_dom_html_looks_usable_detects_player_scripts(self):
+        html = "<html><body><script>html5player.setVideoHLS('https://cdn.example.test/a.m3u8');</script></body></html>"
+        self.assertTrue(engine.dom_html_looks_usable("x" * 600 + html))
+
+    def test_fetch_dom_for_fallback_prefers_urllib_html(self):
+        html = "x" * 600 + "<script>html5player.setVideoUrlHigh('https://cdn.example.test/a.mp4');</script>"
+
+        with mock.patch.object(engine, "fetch_dom_html_with_urllib", return_value=html):
+            with mock.patch.object(engine, "dump_dom_with_browser") as dump_dom:
+                result = engine.fetch_dom_for_fallback("https://example.test/watch")
+        self.assertEqual(result, html)
+        dump_dom.assert_not_called()
+
+    def test_should_try_browser_dom_fallback_skips_tiktok_ip_block(self):
+        self.assertFalse(
+            engine.should_try_browser_dom_fallback("ERROR: [TikTok] 123: Your IP address is blocked from accessing this post")
+        )
+
+    def test_should_retry_with_browser_cookies_for_instagram_empty_media(self):
+        self.assertTrue(
+            engine.should_retry_with_browser_cookies(
+                "ERROR: [Instagram] abc: Instagram sent an empty media response."
+            )
+        )
+
+    def test_browser_dom_download_pipeline_writes_file(self):
+        sample_mp4 = "https://filesamples.com/samples/video/mp4/sample_640x360.mp4"
+        html = f"""
+        <html><head><title>Pipeline Video - Example</title></head><body>
+        <script>
+        var flashvars_1 = {{"video_duration":15,"mediaDefinitions":[
+          {{"height":360,"format":"mp4","videoUrl":"{sample_mp4}","quality":"360"}}
+        ]}};
+        </script></body></html>
+        """
+        page_url = "https://www.example-stream.test/view_video.php?viewkey=pipeline"
+
+        class FailYoutubeDL(FakeYoutubeDL):
+            def extract_info(self, url, download=False):
+                raise RuntimeError("curl: (35) TLS connect error")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = engine.analyze_url(
+                page_url,
+                ydl_factory=FailYoutubeDL,
+                browser_dom_fetcher=lambda url, on_event=None: html,
+            )
+            candidate = result["candidates"][0]
+            self.assertEqual(result["source"], "browser-dom")
+            before = time.time()
+            engine.download_candidate(page_url, candidate, temp_dir, cookie_source="없음")
+            newest = engine.newest_file(temp_dir, "mp4", since=before - 2)
+            self.assertTrue(newest and newest.exists())
+            self.assertGreater(newest.stat().st_size, 100_000)
 
     def test_analyze_url_browser_fallback_keeps_site_title_duration_and_uploader(self):
         class ResetYoutubeDL(FakeYoutubeDL):
