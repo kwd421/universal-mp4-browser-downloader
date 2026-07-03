@@ -297,6 +297,13 @@ def resolution_for(fmt):
     return str(fmt.get("resolution") or "unknown")
 
 
+# File browsers disagree on the size base: Windows Explorer uses binary units
+# (1024) but labels them "KB/MB/GB", while macOS Finder (since 10.6) uses
+# decimal (1000). Match whichever host we run on so the app's number lines up
+# with what the user sees in their own file browser.
+SIZE_UNIT_BASE = 1024 if sys.platform.startswith("win") else 1000
+
+
 def display_size(num_bytes):
     size = safe_int(num_bytes)
     if not size:
@@ -304,9 +311,9 @@ def display_size(num_bytes):
     units = ["B", "KB", "MB", "GB"]
     value = float(size)
     for unit in units:
-        if value < 1000 or unit == units[-1]:
+        if value < SIZE_UNIT_BASE or unit == units[-1]:
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
-        value /= 1000
+        value /= SIZE_UNIT_BASE
     return f"{size} B"
 
 

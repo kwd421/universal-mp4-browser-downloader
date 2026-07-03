@@ -286,7 +286,10 @@ class DownloaderEngineTests(unittest.TestCase):
 
         self.assertEqual(candidates[0]["sort_bytes"], 169_981_750)
         self.assertEqual(candidates[0]["size_source"], "bitrate")
-        self.assertEqual(engine.display_size(candidates[0]["sort_bytes"]), "170.0 MB")
+        # display_size matches the host file browser: binary (1024) on Windows,
+        # decimal (1000) elsewhere.
+        expected_size = "162.1 MB" if engine.SIZE_UNIT_BASE == 1024 else "170.0 MB"
+        self.assertEqual(engine.display_size(candidates[0]["sort_bytes"]), expected_size)
 
     def test_cookie_source_maps_to_yt_dlp_options(self):
         self.assertNotIn("cookiesfrombrowser", engine.build_ydl_options(cookie_source="없음"))
