@@ -787,8 +787,38 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if prepared.get("clip_range"):
             if not prepared.get("clip_cut_mode"):
                 prepared["clip_cut_mode"] = self.clip_cut_mode()
+            self._validate_clip_range_against_duration(prepared)
             prepared = engine.candidate_with_clip_range_metadata(prepared)
         return prepared
+
+    def _validate_clip_range_against_duration(self, candidate):
+        clip_range = (candidate or {}).get("clip_range")
+        if not isinstance(clip_range, dict):
+            return
+        duration = float(engine.safe_int((candidate or {}).get("source_duration") or (candidate or {}).get("duration")))
+        if duration <= 0:
+            return
+        try:
+            start = float(clip_range.get("start") or 0)
+        except (TypeError, ValueError):
+            return
+        if start >= duration:
+            raise ValueError(
+                f"시작 시간이 영상 길이를 벗어났습니다: "
+                f"시작 {engine.display_duration(start)} / 길이 {engine.display_duration(duration)}"
+            )
+        end = clip_range.get("end")
+        if end is None:
+            return
+        try:
+            end = float(end)
+        except (TypeError, ValueError):
+            return
+        if end > duration:
+            raise ValueError(
+                f"종료 시간이 영상 길이를 벗어났습니다: "
+                f"종료 {engine.display_duration(end)} / 길이 {engine.display_duration(duration)}"
+            )
 
     def _apply_download_candidate_to_row(self, row, candidate):
         if not row or not candidate:

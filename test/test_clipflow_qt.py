@@ -4887,7 +4887,7 @@ print(window._candidate_for_download({"id": "row"}, {"title": "Video"}).get("cli
 window._apply_clip_range_popup()
 print(window.clip_cut_mode())
 print(window._candidate_for_download({"id": "row"}, {"title": "Video"}).get("clip_cut_mode"))
-row = {"id": "row", "candidate": {"title": "Video", "display_title": "Video", "output_ext": "mp4", "duration": 120, "sort_bytes": 120}}
+row = {"id": "row", "candidate": {"title": "Video", "display_title": "Video", "output_ext": "mp4", "duration": 3600, "sort_bytes": 3600}}
 first = window._candidate_for_download(row, row["candidate"])
 window._apply_download_candidate_to_row(row, first)
 window.clip_start_input.setText("00:00:30")
@@ -5039,6 +5039,87 @@ print(any("59 이하" in message for message in window.event_messages))
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["00:00:20", "0", "True", "True"])
+
+    def test_clipflow_qt_clip_range_start_past_duration_does_not_start_download(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+calls = []
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    calls.append(candidate)
+    return {"ok": True, "output_dir": output_dir, "target_url": page_url}
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 120},
+        ],
+        "warnings": [],
+    }
+
+window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download)
+window._analysis_finished(fake_analyze("https://media.test/video"))
+row = window.rows[0]
+window.clip_start_input.setText("00:03:00")
+window._apply_clip_range_popup()
+window.start_download_for_row(row)
+while window.active_downloads:
+    app.processEvents()
+print(len(calls))
+print(row["status"])
+print(any("영상 길이" in message for message in window.event_messages))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["0", "오류", "True"])
+
+    def test_clipflow_qt_clip_range_end_past_duration_does_not_start_download(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+app = QApplication([])
+calls = []
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    calls.append(candidate)
+    return {"ok": True, "output_dir": output_dir, "target_url": page_url}
+
+def fake_analyze(url, cookie_source=None, proxy_url=None, output_ext=None, on_event=None):
+    return {
+        "webpage_url": url,
+        "url": url,
+        "title": "Video",
+        "candidates": [
+            {"id": "best", "source": url, "url": url, "title": "Video", "display_title": "Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "resolution": "1080p", "height": 1080, "duration": 120, "sort_bytes": 120},
+        ],
+        "warnings": [],
+    }
+
+window = ClipFlowWindow(analyze_func=fake_analyze, download_func=fake_download)
+window._analysis_finished(fake_analyze("https://media.test/video"))
+row = window.rows[0]
+window.clip_start_input.setText("00:01:00")
+window.clip_end_input.setText("00:03:00")
+window._apply_clip_range_popup()
+window.start_download_for_row(row)
+while window.active_downloads:
+    app.processEvents()
+print(len(calls))
+print(row["status"])
+print(any("종료 시간이 영상 길이를 벗어났습니다" in message for message in window.event_messages))
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["0", "오류", "True"])
 
     def test_clipflow_qt_global_clip_download_updates_visible_row_metadata(self):
         script = r'''

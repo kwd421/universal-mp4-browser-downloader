@@ -165,7 +165,7 @@ class DownloadMixin:
         try:
             prepared_candidate = self._candidate_for_download(row, candidate) if hasattr(self, "_candidate_for_download") else dict(candidate)
         except ValueError as exc:
-            self._set_status(str(exc))
+            self._set_row_download_error(row, str(exc))
             return
         if prepared_candidate.get("clip_range") and hasattr(self, "_apply_download_candidate_to_row"):
             self._apply_download_candidate_to_row(row, prepared_candidate)
@@ -302,11 +302,7 @@ class DownloadMixin:
         try:
             download_candidate = self._candidate_for_download(row, candidate) if hasattr(self, "_candidate_for_download") else candidate
         except ValueError as exc:
-            self._set_status(str(exc))
-            widget = row.get("widget")
-            if widget:
-                widget.set_status(READY_STATUS)
-                widget.set_progress(0, "")
+            self._set_row_download_error(row, str(exc))
             return
         if download_candidate.get("clip_range") and hasattr(self, "_apply_download_candidate_to_row"):
             self._apply_download_candidate_to_row(row, download_candidate)
@@ -431,6 +427,22 @@ class DownloadMixin:
             widget.set_progress(row.get("progress") or 0, row.get("progress_text") or "")
             widget._refresh_actions()
         self._set_status(PAUSED_STATUS)
+
+    def _set_row_download_error(self, row, message):
+        message = str(message or "")
+        if row:
+            row["download_starting"] = False
+            row["status"] = ERROR_STATUS
+            row["status_detail"] = message
+            row["progress"] = 0
+            row["progress_text"] = ""
+            row.setdefault("messages", []).append(message)
+            widget = row.get("widget")
+            if widget:
+                widget.set_status(ERROR_STATUS, message)
+                widget.set_progress(0, "")
+                widget._refresh_actions()
+        self._set_status(message)
 
     def resume_download_for_row(self, row):
         if not row or row not in self.rows:
