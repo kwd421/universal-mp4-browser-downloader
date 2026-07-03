@@ -621,6 +621,21 @@ class DownloadRowWidget(QFrame):
         self.style().polish(self)
         self.update()
 
+    def _sync_ring_timer(self):
+        # The rotating ring animates in two indeterminate phases: analysis, and
+        # the "preparing" window of a download (download_starting: kicked off but
+        # no byte progress yet). A running timer repaints the row each frame.
+        # Only (re)start when idle so an analysis -> starting handoff keeps the
+        # animation phase continuous instead of snapping back to the top-left.
+        spinning = self.property("analyzing") == "true" or self.property("starting") == "true"
+        if spinning:
+            if not self._analysis_ring_timer.isActive():
+                self._analysis_ring_elapsed.restart()
+                self._analysis_ring_timer.start()
+        elif self._analysis_ring_timer.isActive():
+            self._analysis_ring_timer.stop()
+            self._analysis_ring_elapsed.invalidate()
+
     def _advance_analysis_ring(self):
         if self._analysis_ring_elapsed.isValid():
             elapsed = self._analysis_ring_elapsed.elapsed() % self._analysis_ring_duration_ms
@@ -718,14 +733,9 @@ class DownloadRowWidget(QFrame):
             and status not in {DOWNLOAD_STATUS, WAITING_STATUS, PAUSED_STATUS, COMPLETED_STATUS, ERROR_STATUS}
         )
         self.setProperty("analyzing", "true" if analyzing else "false")
-        if analyzing:
-            if not self._analysis_ring_timer.isActive():
-                self._analysis_ring_elapsed.restart()
-                self._analysis_ring_timer.start()
-        else:
-            self._analysis_ring_timer.stop()
-            self._analysis_ring_elapsed.invalidate()
         starting = bool(self.row.get("download_starting"))
+        self.setProperty("starting", "true" if starting else "false")
+        self._sync_ring_timer()
         self.spinner.stop()
         if analyzing or starting or (status == COMPLETED_STATUS and detail):
             self.row_quality_label.setText(detail or status)
@@ -843,7 +853,8 @@ class DownloadRowWidget(QFrame):
         completed = self.property("completed") == "true"
         errored = self.property("errored") == "true"
         analyzing = self.property("analyzing") == "true"
-        if self.property("progressActive") != "true" and not analyzing and not completed and not errored:
+        starting = self.property("starting") == "true"
+        if self.property("progressActive") != "true" and not analyzing and not completed and not errored and not starting:
             return
         _rect, full, gradient = self._progress_paths()
 
@@ -869,6 +880,16 @@ class DownloadRowWidget(QFrame):
             color = theme.GRAPHITE_HOVER if hovered else theme.GRAPHITE
             painter.setPen(QPen(QColor(color), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             painter.drawPath(full)
+            return
+
+        if starting:
+            # "Preparing" phase: the download is resolving formats but no byte
+            # progress exists yet. Spin the same accent segment as a determinate
+            # ring so the row reads as working rather than frozen at 0%.
+            painter.setPen(QPen(QColor(theme.ACCENT_TINT), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(full)
+            painter.setPen(QPen(QBrush(gradient), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(self._analysis_dash_path(_rect))
             return
 
         progress = max(0, min(100, int(self.property("progressValue") or 0)))
