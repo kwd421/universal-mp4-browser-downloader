@@ -47,6 +47,10 @@ DIRECT_MEDIA_PROXY_PART_SIZE = 4 * 1024 * 1024
 DIRECT_MEDIA_SEGMENT_NO_PROGRESS_TIMEOUT = 30.0
 BROWSER_DOM_MANIFEST_NO_PROGRESS_TIMEOUT = 120.0
 BROWSER_DOM_HTML_CACHE_MAX_AGE = 90.0
+BROWSER_DOM_HTML_CACHE_DOWNLOAD_MAX_AGE = 300.0
+BROWSER_DOM_HLS_PARALLEL_MAX_BYTES = 64 * 1024 * 1024
+BROWSER_DOM_HLS_PARALLEL_MAX_SEGMENTS = 160
+BROWSER_DOM_HLS_PARALLEL_WORKERS = 6
 _BROWSER_DOM_HTML_CACHE = {}
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
@@ -2718,6 +2722,8 @@ def duration_from_browser_dom(dom):
                 r'content=["\']([^"\']+)["\'][^>]+itemprop=["\']duration["\']',
             ],
         ),
+        first_html_match(dom, [r'"duration"\s*:\s*(\d{1,7})', r"'duration'\s*:\s*(\d{1,7})"]),
+        first_html_match(dom, [r'<video\b[^>]*\bduration=["\'](\d+)["\']', r'<video\b[^>]*\bdata-duration=["\'](\d+)["\']']),
     ):
         seconds = seconds_from_duration_value(value)
         if seconds:
@@ -2946,7 +2952,38 @@ def refresh_browser_dom_candidate_media(page_url, candidate, on_event=None):
     if not needs_refresh:
         return candidate
     emit_event(on_event, "status", message="브라우저 DOM 미디어 URL 새로고침 중")
-    dom = browser_dom_html_cached(page_url) or ""
+    dom = browser_dom_html_cached(page_url, max_age=BROWSER_DOM_HTML_CACHE_DOWNLOAD_MAX_AGE) or ""
+
+    def apply_refreshed_candidate(analysis):
+        original_is_remote_api = is_browser_remote_media_api_url(media_url) and not candidate.get("is_manifest")
+        prefer_manifest_refresh = original_is_remote_api and needs_browser_profile_for_remote_media(media_url)
+        refreshed = _pick_refreshed_browser_dom_candidate(
+            analysis.get("candidates") or [],
+            safe_int(candidate.get("height")),
+            prefer_direct=not original_is_remote_api or prefer_manifest_refresh,
+            prefer_remote_api=original_is_remote_api and not prefer_manifest_refresh,
+        )
+        if not refreshed or not refreshed.get("url"):
+            return False
+        for key in ("url", "height", "is_manifest", "protocol", "ext", "source_ext", "output_ext", "resolution", "duration", "sort_bytes"):
+            if key in refreshed and refreshed.get(key) not in (None, ""):
+                candidate[key] = refreshed[key]
+        if refreshed.get("title") and not candidate.get("title"):
+            candidate["title"] = refreshed["title"]
+        if refreshed.get("display_title") and not candidate.get("display_title"):
+            candidate["display_title"] = refreshed["display_title"]
+        return True
+
+    if dom_html_looks_usable(dom):
+        analysis = analyze_browser_dom_media(
+            page_url,
+            dom,
+            output_ext=candidate.get("output_ext"),
+            on_event=on_event,
+        )
+        if apply_refreshed_candidate(analysis):
+            emit_event(on_event, "status", message="캐시된 브라우저 DOM 미디어 URL 사용")
+            return candidate
     if not dom_html_looks_usable(dom):
         try:
             dom = fetch_dom_html_with_urllib(page_url, timeout=20)
@@ -2962,23 +2999,8 @@ def refresh_browser_dom_candidate_media(page_url, candidate, on_event=None):
         output_ext=candidate.get("output_ext"),
         on_event=on_event,
     )
-    original_is_remote_api = is_browser_remote_media_api_url(media_url) and not candidate.get("is_manifest")
-    prefer_manifest_refresh = original_is_remote_api and needs_browser_profile_for_remote_media(media_url)
-    refreshed = _pick_refreshed_browser_dom_candidate(
-        analysis.get("candidates") or [],
-        safe_int(candidate.get("height")),
-        prefer_direct=not original_is_remote_api or prefer_manifest_refresh,
-        prefer_remote_api=original_is_remote_api and not prefer_manifest_refresh,
-    )
-    if not refreshed:
+    if not apply_refreshed_candidate(analysis):
         return candidate
-    for key in ("url", "height", "is_manifest", "protocol", "ext", "source_ext", "output_ext", "resolution"):
-        if key in refreshed and refreshed.get(key) not in (None, ""):
-            candidate[key] = refreshed[key]
-    if refreshed.get("title") and not candidate.get("title"):
-        candidate["title"] = refreshed["title"]
-    if refreshed.get("display_title") and not candidate.get("display_title"):
-        candidate["display_title"] = refreshed["display_title"]
     return candidate
 
 
@@ -3542,6 +3564,30 @@ def direct_media_request_headers(candidate):
     return headers
 
 
+def manifest_progress_total_bytes(candidate, part_size, current_sec, duration_sec):
+    expected = candidate_expected_size(candidate)
+    if expected > 0:
+        return expected
+    if not part_size or not current_sec or not duration_sec:
+        return 0
+    if current_sec < max(3.0, duration_sec * 0.15):
+        return 0
+    extrapolated = int(part_size * duration_sec / current_sec)
+    if duration_sec <= 900:
+        return min(extrapolated, 16 * 1024 * 1024)
+    return extrapolated
+
+
+def browser_dom_manifest_movflags(candidate):
+    expected = candidate_expected_size(candidate)
+    if 0 < expected < 16 * 1024 * 1024:
+        return None
+    duration = safe_int((candidate or {}).get("duration"))
+    if duration and duration <= 180 and not expected:
+        return None
+    return "+faststart"
+
+
 def emit_manifest_download_progress(
     on_event,
     current_sec,
@@ -3905,6 +3951,212 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
     }
 
 
+def fetch_hls_playlist_text(url, headers, timeout=30):
+    request = urllib.request.Request(str(url or ""), headers=dict(headers or {}))
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def hls_playlist_is_encrypted(playlist_text):
+    for line in str(playlist_text or "").splitlines():
+        upper = line.upper()
+        if not upper.startswith("#EXT-X-KEY"):
+            continue
+        if "METHOD=NONE" in upper:
+            continue
+        return True
+    return False
+
+
+def resolve_hls_media_playlist(url, headers, max_depth=4):
+    playlist_url = str(url or "")
+    for _ in range(max(1, max_depth)):
+        playlist_text = fetch_hls_playlist_text(playlist_url, headers)
+        if "#EXT-X-STREAM-INF" not in playlist_text:
+            return playlist_url, playlist_text
+        best_url = ""
+        best_bandwidth = -1
+        lines = playlist_text.splitlines()
+        for index, line in enumerate(lines):
+            if not line.startswith("#EXT-X-STREAM-INF"):
+                continue
+            bandwidth_match = re.search(r"BANDWIDTH=(\d+)", line)
+            bandwidth = safe_int(bandwidth_match.group(1)) if bandwidth_match else 0
+            stream_url = ""
+            for next_line in lines[index + 1 :]:
+                next_line = next_line.strip()
+                if not next_line or next_line.startswith("#"):
+                    continue
+                stream_url = next_line
+                break
+            if stream_url and bandwidth >= best_bandwidth:
+                best_bandwidth = bandwidth
+                best_url = urllib.parse.urljoin(playlist_url, stream_url)
+        if not best_url:
+            raise RuntimeError("HLS master playlist had no media streams.")
+        playlist_url = best_url
+    raise RuntimeError("HLS master playlist nesting was too deep.")
+
+
+def iter_hls_segment_urls(playlist_text, playlist_url):
+    segment_urls = []
+    for line in str(playlist_text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        segment_urls.append(urllib.parse.urljoin(playlist_url, line))
+    return segment_urls
+
+
+def browser_dom_hls_prefers_parallel_download(candidate, playlist_text, segment_urls):
+    if ".m3u8" not in str((candidate or {}).get("url") or "").lower():
+        return False
+    if hls_playlist_is_encrypted(playlist_text):
+        return False
+    if not segment_urls:
+        return False
+    if len(segment_urls) > BROWSER_DOM_HLS_PARALLEL_MAX_SEGMENTS:
+        return False
+    expected = candidate_expected_size(candidate)
+    if expected and expected > BROWSER_DOM_HLS_PARALLEL_MAX_BYTES:
+        return False
+    duration = safe_int((candidate or {}).get("duration"))
+    if duration and duration > 1800:
+        return False
+    return True
+
+
+def remux_ts_concat_to_mp4(ts_paths, output_path, ffmpeg_exe, output_format="mp4"):
+    concat_path = output_path.with_suffix(output_path.suffix + ".concat.txt")
+    lines = []
+    for ts_path in ts_paths:
+        escaped = str(ts_path).replace("'", "'\\''")
+        lines.append(f"file '{escaped}'")
+    concat_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    command = [
+        str(ffmpeg_exe),
+        "-y",
+        "-hide_banner",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_path),
+        "-c",
+        "copy",
+        "-f",
+        output_format,
+        str(output_path),
+    ]
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **_hidden_subprocess_kwargs(),
+    )
+    try:
+        concat_path.unlink()
+    except OSError:
+        pass
+    if completed.returncode != 0:
+        raise RuntimeError((completed.stderr or completed.stdout or "HLS remux failed.").strip())
+
+
+def download_browser_dom_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=None):
+    output_dir = Path(output_dir).expanduser()
+    output_path = final_output_path_for_candidate(candidate, output_dir)
+    if output_path is None:
+        raise RuntimeError("Browser DOM manifest output path could not be determined.")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    part_path = output_path.with_name(output_path.name + ".part")
+    ffmpeg_exe = ffmpeg_exe or ffmpeg_path() or shutil.which("ffmpeg")
+    if not ffmpeg_exe:
+        raise RuntimeError("ffmpeg is required for browser DOM manifest downloads")
+    headers = direct_media_request_headers(candidate)
+    duration = safe_int((candidate or {}).get("duration"))
+    playlist_url, playlist_text = resolve_hls_media_playlist(url, headers)
+    segment_urls = iter_hls_segment_urls(playlist_text, playlist_url)
+    if not browser_dom_hls_prefers_parallel_download(candidate, playlist_text, segment_urls):
+        raise RuntimeError("HLS stream is not eligible for parallel segment download.")
+    emit_event(on_event, "status", message=f"Downloading {len(segment_urls)} HLS segments in parallel")
+    started_at = time.monotonic()
+    last_emit_at = started_at
+    last_emit_bytes = 0
+    downloaded_bytes = 0
+
+    def fetch_segment(index_url):
+        index, segment_url = index_url
+        request = urllib.request.Request(segment_url, headers=dict(headers))
+        with urllib.request.urlopen(request, timeout=45) as response:
+            payload = response.read()
+        return index, payload
+
+    segment_paths = [None] * len(segment_urls)
+    workers = max(1, min(BROWSER_DOM_HLS_PARALLEL_WORKERS, len(segment_urls)))
+    expected_total = candidate_expected_size(candidate)
+    with tempfile.TemporaryDirectory(prefix="clipflow-hls-") as temp_dir:
+        temp_root = Path(temp_dir)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(fetch_segment, item) for item in enumerate(segment_urls)]
+            completed_segments = 0
+            for future in concurrent.futures.as_completed(futures):
+                index, payload = future.result()
+                segment_path = temp_root / f"seg_{index:05d}.ts"
+                segment_path.write_bytes(payload)
+                segment_paths[index] = segment_path
+                downloaded_bytes += len(payload)
+                completed_segments += 1
+                if duration:
+                    current_sec = int(duration * completed_segments / len(segment_urls))
+                    emit_manifest_download_progress(
+                        on_event,
+                        current_sec,
+                        duration,
+                        downloaded_bytes=downloaded_bytes,
+                        total_bytes=expected_total or manifest_progress_total_bytes(candidate, downloaded_bytes, max(1, current_sec), duration),
+                        started_at=started_at,
+                        last_bytes=last_emit_bytes,
+                        last_emit_at=last_emit_at,
+                    )
+                else:
+                    percent = completed_segments * 100 / len(segment_urls)
+                    elapsed = max(0.001, time.monotonic() - started_at)
+                    speed = downloaded_bytes / elapsed
+                    speed_text = f"{display_size(speed)}/s"
+                    emit_event(
+                        on_event,
+                        "progress",
+                        percent=percent,
+                        downloaded=downloaded_bytes,
+                        total=expected_total or downloaded_bytes,
+                        speed=speed,
+                        speed_text=speed_text,
+                        message=f"{percent:.1f}% · {speed_text}",
+                    )
+                last_emit_bytes = downloaded_bytes
+                last_emit_at = time.monotonic()
+        remux_ts_concat_to_mp4(
+            segment_paths,
+            part_path,
+            ffmpeg_exe,
+            output_format=normalized_output_ext((candidate or {}).get("output_ext")) or "mp4",
+        )
+    if not part_path.exists() or part_path.stat().st_size <= 0:
+        raise RuntimeError("Parallel HLS download produced an empty file.")
+    part_path.replace(output_path)
+    emit_event(on_event, "file", path=str(output_path))
+    emit_event(on_event, "done", path=str(output_path))
+    return {
+        "ok": True,
+        "output_dir": str(output_dir),
+        "output_path": str(output_path),
+        "target_url": url,
+    }
+
+
 def download_browser_dom_manifest(url, candidate, output_dir, on_event=None, ffmpeg_exe=None, runner=None, no_progress_timeout=None):
     output_dir = Path(output_dir).expanduser()
     output_path = final_output_path_for_candidate(candidate, output_dir)
@@ -3920,6 +4172,11 @@ def download_browser_dom_manifest(url, candidate, output_dir, on_event=None, ffm
     duration = safe_int((candidate or {}).get("duration"))
     if not duration:
         duration = probe_stream_duration(url, candidate)
+    if ".m3u8" in str(url or "").lower():
+        try:
+            return download_browser_dom_hls_parallel(url, candidate, output_dir, on_event=on_event, ffmpeg_exe=ffmpeg_exe)
+        except Exception as exc:
+            emit_event(on_event, "log", message=f"Parallel HLS download unavailable: {exc}")
     output_format = normalized_output_ext((candidate or {}).get("output_ext")) or "mp4"
     command = [
         str(ffmpeg_exe),
@@ -3930,12 +4187,17 @@ def download_browser_dom_manifest(url, candidate, output_dir, on_event=None, ffm
         "-nostats",
         "-headers",
         header_arg,
+        "-allowed_extensions",
+        "ALL",
         "-i",
         url,
         "-c",
         "copy",
-        "-movflags",
-        "+faststart",
+    ]
+    movflags = browser_dom_manifest_movflags(candidate)
+    if movflags:
+        command += ["-movflags", movflags]
+    command += [
         "-f",
         output_format,
         str(part_path),
@@ -4006,9 +4268,7 @@ def download_browser_dom_manifest(url, candidate, output_dir, on_event=None, ffm
             current = safe_int(raw_time) / 1_000_000 if raw_time is not None else 0
             if duration and current > 0:
                 part_size = part_path.stat().st_size if part_path.exists() else 0
-                total_bytes = 0
-                if current >= 3 and part_size > 0:
-                    total_bytes = int(part_size * duration / current)
+                total_bytes = manifest_progress_total_bytes(candidate, part_size, current, duration)
                 emit_manifest_download_progress(
                     on_event,
                     current,

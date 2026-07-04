@@ -1912,6 +1912,45 @@ for line in sys.stdin:
 
         self.assertEqual(duration, 777)
 
+    def test_manifest_progress_total_bytes_caps_unstable_early_estimate(self):
+        candidate = {"sort_bytes": 0, "duration": 600}
+        self.assertEqual(engine.manifest_progress_total_bytes(candidate, 1_000_000, 10, 600), 0)
+        capped = engine.manifest_progress_total_bytes(candidate, 1_000_000, 120, 600)
+        self.assertLessEqual(capped, 16 * 1024 * 1024)
+        self.assertGreater(capped, 1_000_000)
+
+    def test_manifest_progress_total_bytes_uses_candidate_size_when_known(self):
+        candidate = {"sort_bytes": 900_000, "duration": 120}
+        self.assertEqual(engine.manifest_progress_total_bytes(candidate, 200_000, 10, 600), 900_000)
+
+    def test_iter_hls_segment_urls_resolves_relative_paths(self):
+        playlist = "\n".join(
+            [
+                "#EXTM3U",
+                "#EXT-X-VERSION:3",
+                "#EXTINF:2.0,",
+                "seg-001.html",
+                "#EXTINF:2.0,",
+                "seg-002.html",
+            ]
+        )
+        urls = engine.iter_hls_segment_urls(playlist, "https://cdn.example.test/stream/index.m3u8")
+        self.assertEqual(
+            urls,
+            [
+                "https://cdn.example.test/stream/seg-001.html",
+                "https://cdn.example.test/stream/seg-002.html",
+            ],
+        )
+
+    def test_browser_dom_hls_prefers_parallel_download_for_small_unencrypted_playlists(self):
+        playlist = "#EXTM3U\n#EXTINF:1,\nseg.ts\n"
+        segments = engine.iter_hls_segment_urls(playlist, "https://cdn.example.test/index.m3u8")
+        candidate = {"url": "https://cdn.example.test/index.m3u8", "duration": 30, "sort_bytes": 800_000}
+        self.assertTrue(engine.browser_dom_hls_prefers_parallel_download(candidate, playlist, segments))
+        encrypted = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key\"\n#EXTINF:1,\nseg.ts\n"
+        self.assertFalse(engine.browser_dom_hls_prefers_parallel_download(candidate, encrypted, segments))
+
     def test_is_browser_dom_manifest_candidate_detects_hls_entries(self):
         self.assertTrue(
             engine.is_browser_dom_manifest_candidate(
