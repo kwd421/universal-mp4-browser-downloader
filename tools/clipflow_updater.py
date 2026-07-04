@@ -136,19 +136,64 @@ def startup_update_is_available():
     return False
 
 
+class _MainThreadDispatcher:
+    def __init__(self):
+        try:
+            from PySide6.QtCore import QObject, Signal, Slot, Qt
+        except ImportError:
+            self._qt = None
+            return
+        self._qt = True
+
+        class _Bridge(QObject):
+            callback_requested = Signal(object)
+
+            def __init__(self):
+                super().__init__()
+                self.callback_requested.connect(self._run_callback, Qt.QueuedConnection)
+
+            @Slot(object)
+            def _run_callback(self, callback):
+                if callable(callback):
+                    callback()
+
+        self._bridge = _Bridge()
+
+    def dispatch(self, callback):
+        if callback is None:
+            return
+        if self._qt is None:
+            callback()
+            return
+        self._bridge.callback_requested.emit(callback)
+
+
+_MAIN_THREAD_DISPATCHER = None
+
+
+def ensure_main_thread_dispatcher():
+    global _MAIN_THREAD_DISPATCHER
+    if _MAIN_THREAD_DISPATCHER is None:
+        _MAIN_THREAD_DISPATCHER = _MainThreadDispatcher()
+    return _MAIN_THREAD_DISPATCHER
+
+
+def _main_thread_dispatcher():
+    return ensure_main_thread_dispatcher()
+
+
 def _dispatch_to_main_thread(callback):
-    if callback is None:
-        return
     try:
-        from PySide6.QtCore import QTimer, QApplication
+        from PySide6.QtWidgets import QApplication
     except ImportError:
-        callback()
+        if callable(callback):
+            callback()
         return
-    app = QApplication.instance()
-    if app is None:
-        callback()
+    if QApplication.instance() is None:
+        if callable(callback):
+            callback()
         return
-    QTimer.singleShot(0, callback)
+    _main_thread_dispatcher().dispatch(callback)
 
 
 class SparkleUpdater:
@@ -286,6 +331,8 @@ class WinSparkleUpdater:
         if self._winsparkle_ready:
             return self._library is not None
         if self._library is None:
+            self._library = _load_winsparkle_library()
+        if self._library is None:
             return False
         library, callbacks = _init_winsparkle_library(self._library)
         if library is None:
@@ -399,7 +446,7 @@ def start_winsparkle_updater():
     if not updater_configured():
         return None
 
-    updater = WinSparkleUpdater(_load_winsparkle_library())
+    updater = WinSparkleUpdater(None)
     updater._callbacks = []
     return updater
 

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 
-from tools.clipflow_updater import start_app_updater, startup_update_is_available
+from tools.clipflow_updater import ensure_main_thread_dispatcher, start_app_updater, startup_update_is_available
 
 
 TOAST_SEEN = False
@@ -56,6 +56,7 @@ def main():
     os.environ.setdefault("CLIPFLOW_BUILD_NUMBER", "104")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication([])
+    ensure_main_thread_dispatcher()
     # Packaged builds set sys.frozen; mimic that so we exercise the real updater path.
     import tools.clipflow_updater as updater
 

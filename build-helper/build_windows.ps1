@@ -37,4 +37,8 @@ if (-not $SkipTests) {
 }
 
 Invoke-PythonStep "PyInstaller" @("-m", "PyInstaller", "build-helper\ClipFlow.spec", "--noconfirm")
-Copy-Item -Force dist\ClipFlow.exe ClipFlow.exe
+$builtExe = Join-Path $repoRoot "dist\ClipFlow.exe"
+if (-not (Test-Path $builtExe)) {
+    throw "Built executable not found: $builtExe"
+}
+Copy-Item -Force $builtExe (Join-Path $repoRoot "ClipFlow.exe")

@@ -200,6 +200,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "Update verification failed. Fix appcast/updater before uploading $releaseExe"
 }
 
+Write-Host "Verifying frozen startup responsiveness..."
+& (Join-Path $PSScriptRoot "verify_startup_frozen.ps1") -ExePath $builtExe -BuildNumber ($BuildNumber - 1)
+if ($LASTEXITCODE -ne 0) {
+    throw "Startup verification failed for $builtExe"
+}
+
 if (-not $SkipUpload) {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         throw "GitHub CLI (gh) is required for release upload"

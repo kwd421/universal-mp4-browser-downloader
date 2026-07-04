@@ -6,7 +6,7 @@ from urllib.parse import urljoin, urlparse
 from PySide6.QtCore import QElapsedTimer, QEvent, QEasingCurve, QObject, QPoint, QPropertyAnimation, Property, QRect, QRectF, QSize, QSizeF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QAbstractButton, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractButton, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 from shiboken6 import isValid
 
 try:
@@ -1102,11 +1102,13 @@ class UpdateAvailableBanner(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("UpdateToast")
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 10, 10, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(12, 8, 8, 8)
+        layout.setSpacing(8)
         self.message_label = QLabel("새 버전이 있습니다")
         self.message_label.setObjectName("UpdateToastMessage")
+        self.message_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         self.update_button = OutlinedButton("업데이트")
         self.update_button.setObjectName("PrimaryPopupButton")
         self.update_button.setCursor(Qt.PointingHandCursor)
@@ -1117,9 +1119,9 @@ class UpdateAvailableBanner(QFrame):
         self.dismiss_button.setFlat(True)
         self.update_button.clicked.connect(self.update_requested.emit)
         self.dismiss_button.clicked.connect(self._dismiss)
-        layout.addWidget(self.message_label, 1)
+        layout.addWidget(self.message_label, 0)
         layout.addWidget(self.update_button, 0)
-        layout.addWidget(self.dismiss_button, 0, Qt.AlignTop)
+        layout.addWidget(self.dismiss_button, 0, Qt.AlignVCenter)
 
     def _dismiss(self):
         self.hide()

@@ -39,7 +39,7 @@ try:
     from tools.clipflow_views import RenderMixin
     from tools.clipflow_actions import ActionMixin, local_file_url
     from tools.clipflow_settings import SettingsMixin, default_save_folder
-    from tools.clipflow_updater import start_app_updater
+    from tools.clipflow_updater import ensure_main_thread_dispatcher, start_app_updater
 except ImportError:
     import candidate_presenter as presenter
     import downloader_engine as engine
@@ -58,7 +58,7 @@ except ImportError:
     from clipflow_views import RenderMixin
     from clipflow_actions import ActionMixin, local_file_url
     from clipflow_settings import SettingsMixin, default_save_folder
-    from clipflow_updater import start_app_updater
+    from clipflow_updater import ensure_main_thread_dispatcher, start_app_updater
 
 try:
     from tools.clipflow_theme import (
@@ -222,7 +222,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.resize(self._initial_window_size())
         self.setStyleSheet(APP_STYLE)
         self._build_ui()
-        QTimer.singleShot(0, self._load_completed_history)
+        QTimer.singleShot(200, self._load_completed_history)
         self._refresh_primary_action()
 
     def _initial_window_size(self):
@@ -1906,12 +1906,12 @@ def main():
         return analysis_worker_main(sys.argv[1:])
 
     app = QApplication(sys.argv)
+    ensure_main_thread_dispatcher()
     configure_app_font(app)
-    app._clipflow_updater = None
     window = ClipFlowWindow()
     window.show()
-    QTimer.singleShot(0, lambda: setattr(app, "_clipflow_updater", start_app_updater()))
-    QTimer.singleShot(1500, window.schedule_startup_update_check)
+    app._clipflow_updater = start_app_updater()
+    QTimer.singleShot(800, window.schedule_startup_update_check)
 
     if os.environ.get("CLIPFLOW_QT_SMOKE") == "1":
         QTimer.singleShot(0, lambda: (print("ClipFlow smoke launch OK"), app.quit()))

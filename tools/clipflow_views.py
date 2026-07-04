@@ -7,7 +7,7 @@ imports below plus methods that remain on the window class or other mixins.
 
 from PySide6.QtCore import QPoint, QTimer
 from PySide6.QtGui import QCursor
-from PySide6.QtWidgets import QHBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QWidget
 
 try:
     from tools import candidate_presenter as presenter
@@ -36,9 +36,12 @@ class RenderMixin:
         return [row for row in self.rows if self._row_is_visible(row)]
 
     def _render_rows(self):
+        app = QApplication.instance()
         self._sort_rows()
         row_widgets = []
-        for row in self.rows:
+        for row_index, row in enumerate(self.rows):
+            if app is not None and row_index and row_index % 4 == 0:
+                app.processEvents()
             widget = row.get("widget")
             if widget is None:
                 widget = DownloadRowWidget(self, row)

@@ -6,6 +6,7 @@ imports below plus methods that remain on the window class or other mixins.
 """
 
 import json
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QStandardPaths, Qt, QTimer
@@ -15,6 +16,7 @@ try:
     from tools import candidate_presenter as presenter
     from tools import downloader_engine as engine
     from tools import clipflow_theme as theme
+    from tools.clipflow_updater import _dispatch_to_main_thread
     from tools.clipflow_dialogs import PreferencesDialog, _combo_text
     from tools.clipflow_widgets import CleanComboBox, CleanSwitch, ComboPopup, UpdateAvailableBanner
     from tools.clipflow_rows import build_quality_options, row_kind
@@ -28,6 +30,7 @@ except ImportError:
     import candidate_presenter as presenter
     import downloader_engine as engine
     import clipflow_theme as theme
+    from clipflow_updater import _dispatch_to_main_thread
     from clipflow_dialogs import PreferencesDialog, _combo_text
     from clipflow_widgets import CleanComboBox, CleanSwitch, ComboPopup, UpdateAvailableBanner
     from clipflow_rows import build_quality_options, row_kind
@@ -312,60 +315,77 @@ class SettingsMixin:
         )
         self.settings.sync()
 
+    def _history_row_from_item(self, item):
+        if not isinstance(item, dict) or not isinstance(item.get("candidate"), dict):
+            return None
+        candidate = item["candidate"]
+        created_order = engine.safe_int(item.get("created_order")) or self._next_row_sequence()
+        self._row_sequence = max(self._row_sequence, created_order)
+        source_url = (
+            item.get("source_url")
+            or item.get("analysis_source_url")
+            or candidate.get("source")
+            or candidate.get("url")
+            or ""
+        )
+        playlist_key = item.get("playlist_key") or self._playlist_key(item.get("analysis_source_url") or source_url)
+        row = {
+            "id": candidate.get("id") or f"history-{created_order}",
+            "kind": row_kind(candidate),
+            "candidate": candidate,
+            "qualities": [candidate],
+            "quality_options": build_quality_options([candidate]),
+            "selected_index": 0,
+            "selected_format_index": 0,
+            "analysis_source_url": item.get("analysis_source_url") or source_url,
+            "source_url": source_url,
+            "playlist_key": playlist_key,
+            "parent_playlist_id": item.get("parent_playlist_id") or "",
+            "is_playlist_child": bool(item.get("is_playlist_child")),
+            "playlist_child_index": engine.safe_int(item.get("playlist_child_index")),
+            "expanded": bool(item.get("expanded", True)),
+            "status": "완료",
+            "status_detail": "",
+            "progress": 100,
+            "progress_text": "",
+            "output_path": item.get("output_path") or "",
+            "messages": item.get("messages") or [],
+            "created_order": created_order,
+        }
+        if hasattr(self, "_apply_actual_output_size"):
+            self._apply_actual_output_size(row)
+        return row
+
+    def _apply_restored_history(self, items):
+        restored = []
+        for item in items if isinstance(items, list) else []:
+            row = self._history_row_from_item(item)
+            if row is not None:
+                restored.append(row)
+        if not restored:
+            return
+        repaired_missing_parents = self._restore_missing_playlist_parents(restored)
+        restored = self._dedupe_playlist_parent_rows(restored)
+        self._attach_restored_playlist_children(restored)
+        restored = self._dedupe_playlist_parent_rows(restored)
+        self.rows = restored + self.rows
+        self._render_rows()
+        if repaired_missing_parents:
+            self._save_completed_history()
+
     def _load_completed_history(self):
         raw = self.settings.value(DOWNLOAD_HISTORY_SETTING, "", str) or ""
         if not raw:
             return
-        try:
-            items = json.loads(raw)
-        except (TypeError, ValueError):
-            return
-        restored = []
-        for item in items if isinstance(items, list) else []:
-            if not isinstance(item, dict) or not isinstance(item.get("candidate"), dict):
-                continue
-            candidate = item["candidate"]
-            created_order = engine.safe_int(item.get("created_order")) or self._next_row_sequence()
-            self._row_sequence = max(self._row_sequence, created_order)
-            source_url = item.get("source_url") or item.get("analysis_source_url") or candidate.get("source") or candidate.get("url") or ""
-            playlist_key = item.get("playlist_key") or self._playlist_key(
-                item.get("analysis_source_url") or source_url
-            )
-            row = {
-                "id": candidate.get("id") or f"history-{created_order}",
-                "kind": row_kind(candidate),
-                "candidate": candidate,
-                "qualities": [candidate],
-                "quality_options": build_quality_options([candidate]),
-                "selected_index": 0,
-                "selected_format_index": 0,
-                "analysis_source_url": item.get("analysis_source_url") or source_url,
-                "source_url": source_url,
-                "playlist_key": playlist_key,
-                "parent_playlist_id": item.get("parent_playlist_id") or "",
-                "is_playlist_child": bool(item.get("is_playlist_child")),
-                "playlist_child_index": engine.safe_int(item.get("playlist_child_index")),
-                "expanded": bool(item.get("expanded", True)),
-                "status": "완료",
-                "status_detail": "",
-                "progress": 100,
-                "progress_text": "",
-                "output_path": item.get("output_path") or "",
-                "messages": item.get("messages") or [],
-                "created_order": created_order,
-            }
-            if hasattr(self, "_apply_actual_output_size"):
-                self._apply_actual_output_size(row)
-            restored.append(row)
-        if restored:
-            repaired_missing_parents = self._restore_missing_playlist_parents(restored)
-            restored = self._dedupe_playlist_parent_rows(restored)
-            self._attach_restored_playlist_children(restored)
-            restored = self._dedupe_playlist_parent_rows(restored)
-            self.rows = restored + self.rows
-            self._render_rows()
-            if repaired_missing_parents:
-                self._save_completed_history()
+
+        def worker():
+            try:
+                items = json.loads(raw)
+            except (TypeError, ValueError):
+                items = None
+            _dispatch_to_main_thread(lambda: self._apply_restored_history(items))
+
+        threading.Thread(target=worker, name="clipflow-history-load", daemon=True).start()
 
     def _app_updater(self):
         app = QApplication.instance()
