@@ -36,12 +36,17 @@ jobs:
         shell: pwsh
         env:
           CLIPFLOW_WINSPARKLE_PRIVATE_KEY: ${{ secrets.CLIPFLOW_WINSPARKLE_PRIVATE_KEY }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
         run: |
-          if (-not $env:CLIPFLOW_WINSPARKLE_PRIVATE_KEY) {
-            throw "Missing GitHub secret CLIPFLOW_WINSPARKLE_PRIVATE_KEY"
+          $keyMaterial = $env:CLIPFLOW_WINSPARKLE_PRIVATE_KEY
+          if (-not $keyMaterial) {
+            $keyMaterial = $env:PRIVATE_KEY
+          }
+          if (-not $keyMaterial) {
+            throw "Missing GitHub secret CLIPFLOW_WINSPARKLE_PRIVATE_KEY or PRIVATE_KEY"
           }
           $keyPath = Join-Path $env:RUNNER_TEMP "winsparkle-private.key"
-          Set-Content -Path $keyPath -Value $env:CLIPFLOW_WINSPARKLE_PRIVATE_KEY -NoNewline -Encoding utf8
+          Set-Content -Path $keyPath -Value $keyMaterial -NoNewline -Encoding utf8
           "CLIPFLOW_WINSPARKLE_PRIVATE_KEY_FILE=$keyPath" >> $env:GITHUB_ENV
 
       - name: Build, sign, and update appcast

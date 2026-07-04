@@ -3,10 +3,10 @@ param(
     [string]$Version,
     [string]$BuildNumber,
     [string]$Tag,
-    [string]$Repo = $(if ($env:CLIPFLOW_GITHUB_REPO) { $env:CLIPFLOW_GITHUB_REPO } else { "kwd421/universal-mp4-browser-downloader" }),
+    [string]$Repo = $(if ($env:CLIPFLOW_GITHUB_REPO) { $env:CLIPFLOW_GITHUB_REPO } else { "kwd421/ClipFlow" }),
     [string]$PrivateKeyFile,
-    [string]$FeedUrl = $(if ($env:CLIPFLOW_WINSPARKLE_FEED_URL) { $env:CLIPFLOW_WINSPARKLE_FEED_URL } else { "https://kwd421.github.io/universal-mp4-browser-downloader/appcast-windows.xml" }),
-    [string]$PagesBase = "https://kwd421.github.io/universal-mp4-browser-downloader",
+    [string]$FeedUrl = $(if ($env:CLIPFLOW_WINSPARKLE_FEED_URL) { $env:CLIPFLOW_WINSPARKLE_FEED_URL } else { "https://kwd421.github.io/ClipFlow/appcast-windows.xml" }),
+    [string]$PagesBase = "https://kwd421.github.io/ClipFlow",
     [switch]$SkipUpload,
     [switch]$SkipBuild
 )
