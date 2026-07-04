@@ -5046,11 +5046,6 @@ print(window.clip_start_input.text())
 print(window.clip_end_input.text())
 print(window.current_clip_range())
 print(window.clip_cut_mode())
-window._set_clip_cut_mode("accurate")
-print(window.clip_cut_mode())
-print(window._candidate_for_download({"id": "row"}, {"title": "Video"}).get("clip_cut_mode"))
-window._apply_clip_range_popup()
-print(window.clip_cut_mode())
 print(window._candidate_for_download({"id": "row"}, {"title": "Video"}).get("clip_cut_mode"))
 row = {"id": "row", "candidate": {"title": "Video", "display_title": "Video", "output_ext": "mp4", "duration": 3600, "sort_bytes": 3600}}
 first = window._candidate_for_download(row, row["candidate"])
@@ -5087,9 +5082,6 @@ print(second["display_title"])
                 "{'start': 600.0, 'end': 1200.0}",
                 "fast",
                 "fast",
-                "fast",
-                "accurate",
-                "accurate",
                 "{'start': 600.0, 'end': 1200.0}",
                 "{'start': 30.0, 'end': 40.0}",
                 "Video [00m30s-00m40s]",
@@ -5118,12 +5110,6 @@ print(window.clip_end_input.display_text())
 print(len(window.clip_range_popup.findChildren(QComboBox)))
 print([button.text() for button in window.clip_range_popup.findChildren(QPushButton)])
 start_rects = window.clip_start_input._segment_rects
-fast_left = window.clip_cut_fast.mapTo(window.clip_range_popup, window.clip_cut_fast.rect().topLeft()).x()
-accurate_right = window.clip_cut_accurate.mapTo(window.clip_range_popup, window.clip_cut_accurate.rect().topRight()).x()
-input_left = window.clip_start_input.mapTo(window.clip_range_popup, window.clip_start_input.rect().topLeft()).x()
-input_right = window.clip_start_input.mapTo(window.clip_range_popup, window.clip_start_input.rect().topRight()).x()
-print(input_left + start_rects[0].left() - 1 == fast_left)
-print(input_right == accurate_right)
 print(start_rects[0].left() > 0)
 print(window.clip_start_input.cursor().shape() == Qt.PointingHandCursor)
 print(all(button.cursor().shape() == Qt.PointingHandCursor for button in window.clip_range_popup.findChildren(QPushButton)))
@@ -5133,7 +5119,7 @@ print(all(button.cursor().shape() == Qt.PointingHandCursor for button in window.
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            ["None", "True", "시작시간", "종료시간", "HH:MM:SS", "HH:MM:SS", "0", "['빠른 컷', '정확 컷', '초기화', '적용']", "True", "True", "True", "True", "True"],
+            ["None", "True", "시작시간", "종료시간", "HH:MM:SS", "HH:MM:SS", "0", "['초기화', '적용']", "True", "True", "True"],
         )
 
     def test_clipflow_qt_clip_range_popup_enter_applies(self):

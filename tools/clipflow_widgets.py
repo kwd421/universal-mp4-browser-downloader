@@ -259,22 +259,19 @@ class ClearingUrlInput(QLineEdit):
         super().insertFromMimeData(source)
         self.pasted.emit()
 
-    def _set_field_focus(self, focused):
+    def _sync_field_box_border(self):
         box = self.parent()
         if box is not None and box.objectName() == "FieldBox":
             if hasattr(box, "set_colors"):
-                box.set_colors(border=theme.ACCENT if focused else theme.GRAPHITE)
-            box.setProperty("focused", "true" if focused else "false")
-            box.style().unpolish(box)
-            box.style().polish(box)
+                box.set_colors(border=theme.GRAPHITE)
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
-        self._set_field_focus(True)
+        self._sync_field_box_border()
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
-        self._set_field_focus(False)
+        self._sync_field_box_border()
 
 
 class PathDisplayInput(QLineEdit):
@@ -1120,6 +1117,7 @@ class ThumbnailPlaceholder(QFrame):
         self._install_preview_event_filter()
         self.setObjectName("ThumbBox")
         self.setFixedSize(THUMBNAIL_WIDTH, 54)
+        self.setCursor(Qt.ArrowCursor)
         self.setMouseTracking(True)
         self.icon = LucideIconWidget("play", size=22, color=theme.MUTED, parent=self)
         self.thumbnail_url = ""

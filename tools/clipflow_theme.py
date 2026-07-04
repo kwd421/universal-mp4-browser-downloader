@@ -354,6 +354,9 @@ QLineEdit#BareInput {{
     border-radius: 0px;
     padding: 0px;
 }}
+QLineEdit#BareInput:focus {{
+    border: none;
+}}
 QPushButton#InlinePaste {{
     background: transparent;
     border: none;

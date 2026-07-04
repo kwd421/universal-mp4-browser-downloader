@@ -4,7 +4,7 @@ import time
 from collections import OrderedDict, deque
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSettings, QSize, Qt, QThread, QTimer, QUrl, Slot, qInstallMessageHandler
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QInputMethodEvent, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -328,10 +328,14 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.select_toggle.setIcon(QIcon(checkbox_outline_pixmap(20, color, checked=checked)))
 
     def eventFilter(self, obj, event):
-        if hasattr(self, "search_input") and obj is self.search_input and event.type() == event.Type.KeyPress:
-            if event.key() == Qt.Key_Escape:
-                self._set_search_expanded(False)
-                return True
+        if hasattr(self, "search_input") and obj is self.search_input:
+            if event.type() == event.Type.KeyPress:
+                if event.key() == Qt.Key_Escape:
+                    self._set_search_expanded(False)
+                    return True
+            elif event.type() == event.Type.InputMethod and isinstance(event, QInputMethodEvent):
+                self._search_preedit = event.preeditString()
+                QTimer.singleShot(0, self._on_search_text_changed)
         if getattr(self, "clip_range_popup", None) is obj and event.type() == event.Type.Hide:
             self._restore_clip_range_draft_from_applied()
         if getattr(self, "clip_range_popup", None) is obj and event.type() == event.Type.KeyPress:
@@ -466,22 +470,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.clip_end_input.textChanged.connect(self._clear_clip_range_apply_error)
         self._applied_clip_start_text = ""
         self._applied_clip_end_text = ""
-        self._applied_clip_cut_mode = "fast"
         self._clip_range_apply_error = ""
-        self.clip_cut_fast = OutlinedButton("빠른 컷")
-        self.clip_cut_fast.setObjectName("CutModeButton")
-        self.clip_cut_fast.setCheckable(True)
-        self.clip_cut_fast.setChecked(True)
-        self.clip_cut_fast.setCursor(Qt.PointingHandCursor)
-        self.clip_cut_fast.setToolTip("재인코딩 없이 빠르게 저장합니다. 키프레임 간격에 따라 시작/종료 지점이 몇 초 정도 어긋날 수 있습니다.")
-        self.clip_cut_accurate = OutlinedButton("정확 컷")
-        self.clip_cut_accurate.setObjectName("CutModeButton")
-        self.clip_cut_accurate.setCheckable(True)
-        self.clip_cut_accurate.setCursor(Qt.PointingHandCursor)
-        self.clip_cut_accurate.setToolTip("시작/종료 지점을 정확하게 맞춥니다. 재인코딩 때문에 느리고 CPU를 더 사용할 수 있습니다.")
-        self.clip_cut_fast.clicked.connect(lambda: self._set_clip_cut_mode("fast"))
-        self.clip_cut_accurate.clicked.connect(lambda: self._set_clip_cut_mode("accurate"))
-        self._refresh_clip_cut_buttons()
 
         self.folder_input = PathDisplayInput(self._initial_save_folder())
         self.folder_input.editingFinished.connect(self._save_folder_from_input)
@@ -581,6 +570,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         search_frame_layout.setContentsMargins(10, 0, 10, 0)
         search_frame_layout.setSpacing(0)
         search_frame_layout.addWidget(self.search_input)
+        self._search_preedit = ""
         self.search_input.textChanged.connect(self._on_search_text_changed)
         self.search_input.installEventFilter(self)
         self.search_animation = QPropertyAnimation(self.search_input_frame, b"maximumWidth", self)
@@ -719,6 +709,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             self.search_input.setFocus(Qt.MouseFocusReason)
             return
         self.search_input.clear()
+        self._search_preedit = ""
         self.search_animation.setStartValue(self.search_input_frame.maximumWidth())
         self.search_animation.setEndValue(0)
         self.search_animation.finished.connect(self._hide_collapsed_search)
@@ -734,6 +725,12 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
 
     def _on_search_text_changed(self, *_args):
         self._render_rows()
+
+    def _search_query_text(self):
+        if not hasattr(self, "search_input"):
+            return ""
+        query = self.search_input.text() + getattr(self, "_search_preedit", "")
+        return query.strip().casefold()
 
     def _handle_primary_action(self):
         current_url = self.url_input.text().strip()
@@ -943,12 +940,6 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             " border-radius: 8px; padding: 7px 12px; font-size: 13px; font-weight: 600;"
             f"}}"
             f"QPushButton#SecondaryButton:hover {{ background: {theme.SURFACE_SOFT}; border-color: {theme.GRAPHITE}; }}"
-            f"QPushButton#CutModeButton {{"
-            f" background: {theme.SURFACE}; color: {theme.INK}; border: 1px solid {theme.GRAPHITE};"
-            " border-radius: 8px; padding: 7px 10px; font-size: 13px; font-weight: 700;"
-            f"}}"
-            f"QPushButton#CutModeButton:hover {{ background: {theme.SURFACE_SOFT}; border-color: {theme.GRAPHITE}; }}"
-            f"QPushButton#CutModeButton[selected='true'] {{ background: {theme.INK}; color: {theme.ON_ACCENT}; border-color: {theme.INK}; }}"
         )
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -959,20 +950,6 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.clip_end_label.setToolTip(self.clip_end_input.toolTip())
         layout.addWidget(start_row)
         layout.addWidget(end_row)
-        cut_row = QWidget()
-        cut_layout = QHBoxLayout(cut_row)
-        cut_layout.setContentsMargins(0, 0, 0, 0)
-        cut_layout.setSpacing(10)
-        cut_label = QLabel("컷 방식")
-        cut_label.setObjectName("ClipRangeLabel")
-        cut_label.setFixedWidth(74)
-        cut_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.clip_cut_fast.setFixedSize(77, 34)
-        self.clip_cut_accurate.setFixedSize(77, 34)
-        cut_layout.addWidget(cut_label)
-        cut_layout.addWidget(self.clip_cut_fast)
-        cut_layout.addWidget(self.clip_cut_accurate)
-        layout.addWidget(cut_row)
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(10)
@@ -996,31 +973,8 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         popup.installEventFilter(self)
         return popup
 
-    def _refresh_clip_cut_buttons(self):
-        if not hasattr(self, "clip_cut_fast"):
-            return
-        for button in (self.clip_cut_fast, self.clip_cut_accurate):
-            button.setProperty("selected", "true" if button.isChecked() else "false")
-            button.style().unpolish(button)
-            button.style().polish(button)
-
-    def _set_clip_cut_mode(self, mode):
-        accurate = str(mode or "").lower() == "accurate"
-        self.clip_cut_fast.blockSignals(True)
-        self.clip_cut_accurate.blockSignals(True)
-        try:
-            self.clip_cut_fast.setChecked(not accurate)
-            self.clip_cut_accurate.setChecked(accurate)
-        finally:
-            self.clip_cut_fast.blockSignals(False)
-            self.clip_cut_accurate.blockSignals(False)
-        self._refresh_clip_cut_buttons()
-
-    def _draft_clip_cut_mode(self):
-        return "accurate" if getattr(self, "clip_cut_accurate", None) and self.clip_cut_accurate.isChecked() else "fast"
-
     def clip_cut_mode(self):
-        return "accurate" if getattr(self, "_applied_clip_cut_mode", "fast") == "accurate" else "fast"
+        return "fast"
 
     def _toggle_clip_range_popup(self):
         if getattr(self.clip_range_button, "_ignore_next_popup", False):
@@ -1034,7 +988,6 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             popup = self._create_clip_range_popup()
             self.clip_range_popup = popup
         self._set_clip_input_texts(self._applied_clip_start_text, self._applied_clip_end_text)
-        self._set_clip_cut_mode(self.clip_cut_mode())
         self._position_clip_range_popup(popup)
         popup.show()
 
@@ -1072,7 +1025,6 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             self._set_clip_input_texts("", "")
         self._applied_clip_start_text = start_text
         self._applied_clip_end_text = end_text
-        self._applied_clip_cut_mode = self._draft_clip_cut_mode()
         popup = getattr(self, "clip_range_popup", None)
         if popup:
             popup.close()
@@ -1689,7 +1641,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     def _row_matches_search(self, row):
         if not hasattr(self, "search_input"):
             return True
-        query = self.search_input.text().strip().casefold()
+        query = self._search_query_text()
         if not query:
             return True
         candidate = self.selected_candidate_for_row_ref(row) or row.get("candidate") or {}

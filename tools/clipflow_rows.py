@@ -179,7 +179,6 @@ class DownloadRowWidget(QFrame):
         self.setObjectName("DownloadRow")
         self.setProperty("selected", "false")
         self.setProperty("hovered", "false")
-        self.setCursor(Qt.PointingHandCursor)
         self.setMouseTracking(True)
         self.setFixedHeight(ROW_HEIGHT)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
