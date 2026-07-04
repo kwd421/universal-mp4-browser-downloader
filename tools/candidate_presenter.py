@@ -200,18 +200,25 @@ def _best_candidate(candidates, preferences):
     quality_auto = _is_best_quality(preferences.quality)
     if not _hdr_enabled(getattr(preferences, "hdr", "끔")) and any(not _is_hdr_candidate(candidate) for candidate in candidates):
         candidates = [candidate for candidate in candidates if not _is_hdr_candidate(candidate)]
-    if target_height and any(engine.safe_int(candidate.get("height")) <= target_height for candidate in candidates):
-        candidates = [
+    # Unknown height/fps surfaces as 0; treat 0 as "cannot judge", not as a low
+    # value that satisfies the <= target filter (otherwise an unknown-height
+    # direct MP4 would knock out a known 1080p candidate when user picks 720p).
+    if target_height:
+        under_or_equal = [
             candidate
             for candidate in candidates
-            if engine.safe_int(candidate.get("height")) <= target_height
+            if 0 < engine.safe_int(candidate.get("height")) <= target_height
         ]
-    if target_fps and any(engine.safe_int(candidate.get("fps")) <= target_fps for candidate in candidates):
-        candidates = [
+        if under_or_equal:
+            candidates = under_or_equal
+    if target_fps:
+        under_or_equal = [
             candidate
             for candidate in candidates
-            if engine.safe_int(candidate.get("fps")) <= target_fps
+            if 0 < engine.safe_int(candidate.get("fps")) <= target_fps
         ]
+        if under_or_equal:
+            candidates = under_or_equal
 
     def score(candidate):
         height = _effective_height_for_auto(candidate) if quality_auto else engine.safe_int(candidate.get("height"))

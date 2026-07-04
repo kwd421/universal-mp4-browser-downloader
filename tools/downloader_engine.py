@@ -35,6 +35,10 @@ ISO_DURATION_RE = re.compile(
     r"^P(?:(?P<days>\d+(?:\.\d+)?)D)?(?:T(?:(?P<hours>\d+(?:\.\d+)?)H)?(?:(?P<minutes>\d+(?:\.\d+)?)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$",
     re.IGNORECASE,
 )
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_HTML_BYTES = 5 * 1024 * 1024
+MAX_APPCAST_BYTES = 1 * 1024 * 1024
+
 VIDEO_EXTENSIONS = {"mp4", "m4v", "mov", "webm", "mkv", "flv", "ts"}
 AUDIO_OUTPUT_EXTENSIONS = {"mp3", "wav", "aac"}
 OUTPUT_EXTENSIONS = {"mp4", "webm"} | AUDIO_OUTPUT_EXTENSIONS
@@ -66,7 +70,6 @@ COOKIE_SOURCES = {
     "opera": ("opera",),
     "vivaldi": ("vivaldi",),
     "whale": ("whale",),
-    "chromium": ("chromium",),
 }
 
 
@@ -1367,7 +1370,23 @@ def image_extension_from_response(content_type, url):
     return ".img"
 
 
-def fetch_binary_url(url, referer=None, timeout=20, headers=None):
+def read_limited(response, max_bytes, chunk=64 * 1024):
+    # Bound memory when the user pastes an external page/media URL that a
+    # server answers with an oversized body.
+    chunks = []
+    total = 0
+    while True:
+        block = response.read(chunk)
+        if not block:
+            break
+        total += len(block)
+        if total > max_bytes:
+            raise RuntimeError(f"Response too large: > {max_bytes} bytes")
+        chunks.append(block)
+    return b"".join(chunks)
+
+
+def fetch_binary_url(url, referer=None, timeout=20, headers=None, max_bytes=MAX_IMAGE_BYTES):
     request_headers = {
         "User-Agent": USER_AGENT,
         "Accept-Language": ACCEPT_LANGUAGE,
@@ -1380,7 +1399,7 @@ def fetch_binary_url(url, referer=None, timeout=20, headers=None):
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             content_type = response.headers.get("Content-Type") or ""
-            return response.read(), content_type
+            return read_limited(response, max_bytes), content_type
     except Exception as urllib_exc:
         try:
             apply_curl_cffi_system_dns_patch()
@@ -1393,7 +1412,10 @@ def fetch_binary_url(url, referer=None, timeout=20, headers=None):
                 timeout=timeout,
             )
             response.raise_for_status()
-            return response.content, response.headers.get("Content-Type") or ""
+            content = response.content
+            if len(content) > max_bytes:
+                raise RuntimeError(f"Response too large: > {max_bytes} bytes")
+            return content, response.headers.get("Content-Type") or ""
         except Exception:
             raise urllib_exc
 
@@ -2125,8 +2147,6 @@ def candidates_from_info(info, output_ext=None):
             vcodec = str(fmt.get("vcodec") or "unknown")
             acodec = str(fmt.get("acodec") or "unknown")
             if audio_output_exts and is_audio_format(fmt):
-                if not is_audio_format(fmt):
-                    continue
                 size, size_source = media_size_for_format(fmt, duration)
                 filesize, filesize_approx = candidate_filesize_fields(fmt, size, size_source)
                 source = video_info.get("webpage_url") or video_info.get("original_url") or info.get("webpage_url") or ""
@@ -2533,7 +2553,7 @@ def dom_html_looks_usable(html):
     return any(marker.lower() in lower for marker in markers)
 
 
-def fetch_dom_html_with_urllib(url, timeout=20):
+def fetch_dom_html_with_urllib(url, timeout=20, max_bytes=MAX_HTML_BYTES):
     request = urllib.request.Request(
         str(url or ""),
         headers={
@@ -2544,11 +2564,11 @@ def fetch_dom_html_with_urllib(url, timeout=20):
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read()
+            body = read_limited(response, max_bytes)
     except urllib.error.HTTPError as exc:
         if exc.code not in {403, 451, 503}:
             raise
-        body = exc.read()
+        body = read_limited(exc, max_bytes)
     if not body:
         return ""
     return clean_browser_dom(body.decode("utf-8", errors="replace"))

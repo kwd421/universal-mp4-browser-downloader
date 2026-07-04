@@ -100,7 +100,7 @@ class ClipFlowUpdaterTests(unittest.TestCase):
             b"<channel><item><sparkle:version>104</sparkle:version></item></channel></rss>"
         )
         with mock.patch("urllib.request.urlopen") as urlopen:
-            urlopen.return_value.__enter__.return_value.read.return_value = xml
+            urlopen.return_value.__enter__.return_value.read.side_effect = [xml, b""]
             self.assertEqual(
                 updater._latest_appcast_build_number("https://example.test/appcast.xml"),
                 104,

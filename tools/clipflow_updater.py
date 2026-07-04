@@ -15,6 +15,8 @@ from pathlib import Path
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 SPARKLE_VERSION_TAG = f"{{{SPARKLE_NS}}}version"
 
+_MAX_APPCAST_BYTES = 1024 * 1024
+
 DEFAULT_WINDOWS_FEED_URL = "https://kwd421.github.io/ClipFlow/appcast-windows.xml"
 FALLBACK_WINDOWS_FEED_URL = "https://raw.githubusercontent.com/kwd421/ClipFlow/main/docs/appcast-windows.xml"
 
@@ -112,7 +114,17 @@ def _build_number_int(value):
 def _latest_appcast_build_number(feed_url):
     request = urllib.request.Request(feed_url, headers={"User-Agent": "ClipFlow-Updater"})
     with urllib.request.urlopen(request, timeout=15) as response:
-        root = ET.fromstring(response.read())
+        chunks = []
+        total = 0
+        while True:
+            block = response.read(64 * 1024)
+            if not block:
+                break
+            total += len(block)
+            if total > _MAX_APPCAST_BYTES:
+                raise RuntimeError("Appcast feed too large")
+            chunks.append(block)
+        root = ET.fromstring(b"".join(chunks))
     item = root.find("channel/item")
     if item is None:
         return None

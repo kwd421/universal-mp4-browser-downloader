@@ -36,59 +36,66 @@ class RenderMixin:
         return [row for row in self.rows if self._row_is_visible(row)]
 
     def _render_rows(self):
-        app = QApplication.instance()
-        self._sort_rows()
-        row_widgets = []
-        for row_index, row in enumerate(self.rows):
-            if app is not None and row_index and row_index % 4 == 0:
-                app.processEvents()
-            widget = row.get("widget")
-            if widget is None:
-                widget = DownloadRowWidget(self, row)
-                row["widget"] = widget
-            else:
-                widget.refresh()
-            widget.set_select_mode(self.select_mode)
-            render_widget = self._row_render_widget(row, widget)
-            row_widgets.append((row, widget, render_widget))
+        if getattr(self, "_rendering_rows", False):
+            self._render_rows_again = True
+            return
+        self._rendering_rows = True
+        try:
+            self._sort_rows()
+            row_widgets = []
+            for row_index, row in enumerate(self.rows):
+                widget = row.get("widget")
+                if widget is None:
+                    widget = DownloadRowWidget(self, row)
+                    row["widget"] = widget
+                else:
+                    widget.refresh()
+                widget.set_select_mode(self.select_mode)
+                render_widget = self._row_render_widget(row, widget)
+                row_widgets.append((row, widget, render_widget))
 
-        expected_widgets = {render_widget for _row, _widget, render_widget in row_widgets}
-        existing_widgets = []
-        for index in range(self.row_layout.count() - 1):
-            item = self.row_layout.itemAt(index)
-            widget = item.widget() if item else None
-            if widget:
-                existing_widgets.append(widget)
-        for widget in existing_widgets:
-            if widget in expected_widgets:
-                continue
-            self.row_layout.removeWidget(widget)
-            widget.hide()
-            widget.setParent(None)
-            widget.deleteLater()
+            expected_widgets = {render_widget for _row, _widget, render_widget in row_widgets}
+            existing_widgets = []
+            for index in range(self.row_layout.count() - 1):
+                item = self.row_layout.itemAt(index)
+                widget = item.widget() if item else None
+                if widget:
+                    existing_widgets.append(widget)
+            for widget in existing_widgets:
+                if widget in expected_widgets:
+                    continue
+                self.row_layout.removeWidget(widget)
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
 
-        for index, (row, widget, render_widget) in enumerate(row_widgets):
-            current_index = self.row_layout.indexOf(render_widget)
-            if current_index != index:
-                if current_index >= 0:
-                    self.row_layout.removeWidget(render_widget)
-                self.row_layout.insertWidget(index, render_widget)
-            visible = self._row_is_visible(row)
-            render_widget.setVisible(visible)
-            widget.setVisible(visible)
-        visible_rows = self._visible_rows()
-        self.count_label.setText(f"{len(self.rows)}개")
-        if hasattr(self, "empty_state"):
-            self.empty_state.setGeometry(self.scroll_area.viewport().rect())
-            self.empty_state.setVisible(not visible_rows)
-            if not visible_rows:
-                self.empty_state.raise_()
-        self._refresh_footer()
-        self._refresh_row_selection()
-        self._refresh_primary_action()
-        self._refresh_playlist_float_button()
-        self._refresh_scrollbar_activity()
-        QTimer.singleShot(0, self._refresh_hovered_row_under_cursor)
+            for index, (row, widget, render_widget) in enumerate(row_widgets):
+                current_index = self.row_layout.indexOf(render_widget)
+                if current_index != index:
+                    if current_index >= 0:
+                        self.row_layout.removeWidget(render_widget)
+                    self.row_layout.insertWidget(index, render_widget)
+                visible = self._row_is_visible(row)
+                render_widget.setVisible(visible)
+                widget.setVisible(visible)
+            visible_rows = self._visible_rows()
+            self.count_label.setText(f"{len(self.rows)}개")
+            if hasattr(self, "empty_state"):
+                self.empty_state.setGeometry(self.scroll_area.viewport().rect())
+                self.empty_state.setVisible(not visible_rows)
+                if not visible_rows:
+                    self.empty_state.raise_()
+            self._refresh_footer()
+            self._refresh_row_selection()
+            self._refresh_primary_action()
+            self._refresh_playlist_float_button()
+            self._refresh_scrollbar_activity()
+            QTimer.singleShot(0, self._refresh_hovered_row_under_cursor)
+        finally:
+            self._rendering_rows = False
+            if getattr(self, "_render_rows_again", False):
+                self._render_rows_again = False
+                QTimer.singleShot(0, self._render_rows)
 
     def _refresh_hovered_row_under_cursor(self):
         cursor_pos = QCursor.pos()

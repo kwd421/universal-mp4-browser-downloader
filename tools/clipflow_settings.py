@@ -6,6 +6,7 @@ imports below plus methods that remain on the window class or other mixins.
 """
 
 import json
+import re
 import threading
 from pathlib import Path
 
@@ -62,6 +63,23 @@ def default_save_folder():
         if base_path:
             return Path(base_path) / APP_NAME
     return Path(".").resolve() / APP_NAME
+
+
+DOWNLOAD_HISTORY_MAX_ENTRIES = 100
+
+# Query-string keys that commonly carry signed-URL / CDN tokens. Stripped from
+# history entries so persisting completed downloads does not leak credentials.
+_SIGNED_QUERY_TOKEN_RE = re.compile(
+    r"([?&])(?:token|signature|sig|expires|expire|exp|x-amz-signature|x-amz-credential|x-amz-date|x-amz-expires|x-amz-security-token|x-amz-signedheaders)(?:=[^&#]*)",
+    re.IGNORECASE,
+)
+
+
+def _strip_signed_url_tokens(value):
+    text = str(value or "")
+    if not text:
+        return ""
+    return _SIGNED_QUERY_TOKEN_RE.sub("", text)
 
 
 class SettingsMixin:
@@ -287,15 +305,12 @@ class SettingsMixin:
                 continue
             candidate = row.get("candidate") or {}
             candidate_payload = self._json_ready(candidate)
-            media_url = str(candidate_payload.get("url") or "")
-            source_url = str(candidate_payload.get("source") or row.get("source_url") or "")
-            if "chzzk.naver.com/" in source_url and media_url.startswith(("http://", "https://")) and "chzzk.naver.com/" not in media_url:
-                candidate_payload.pop("url", None)
+            candidate_payload.pop("url", None)
             payload.append(
                 {
                     "candidate": candidate_payload,
-                    "source_url": row.get("source_url") or "",
-                    "analysis_source_url": row.get("analysis_source_url") or "",
+                    "source_url": _strip_signed_url_tokens(row.get("source_url") or ""),
+                    "analysis_source_url": _strip_signed_url_tokens(row.get("analysis_source_url") or ""),
                     "playlist_key": self._playlist_group_key_for_row(row) if row.get("kind") == "playlist" else row.get("playlist_key") or "",
                     "parent_playlist_id": row.get("parent_playlist_id") or "",
                     "is_playlist_child": bool(row.get("is_playlist_child")),
@@ -306,7 +321,8 @@ class SettingsMixin:
                     "messages": self._json_ready(row.get("messages") or []),
                 }
             )
-        return payload
+        payload.sort(key=lambda item: int(item.get("created_order") or 0), reverse=True)
+        return payload[:DOWNLOAD_HISTORY_MAX_ENTRIES]
 
     def _save_completed_history(self):
         self.settings.setValue(
