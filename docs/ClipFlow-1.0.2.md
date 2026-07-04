@@ -1,3 +1,11 @@
 # ClipFlow 1.0.2
 
-Notarized ClipFlow release with Sparkle automatic update support.
+## 변경 사항
+
+- macOS Sparkle / Windows WinSparkle 자동 업데이트 파이프라인을 처음 연결했습니다.
+- 구간 다운로드 검증, 팝업 버튼 레이아웃, 행 테두리·용량 표시 등 UI 안정화를 반영했습니다.
+- 아이콘 갱신, ffmpeg 창 숨김, 다운로드 컨트롤 개선을 포함했습니다.
+
+## 업데이트 안내
+
+- Windows 사용자는 **1.0.3** 이상으로 올리는 것을 권장합니다. 초기 WinSparkle 빌드는 후속 버전에서 보완되었습니다.
