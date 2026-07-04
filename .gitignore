@@ -29,3 +29,8 @@ downloads/
 
 build-helper/third_party/**/*.pdb
 build-helper/third_party/**/*.zip
+
+.grok/
+terminals/
+manual_verification_downloads_utf8_fix/
+docs/codex-session-handoff.md
