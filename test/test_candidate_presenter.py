@@ -223,7 +223,7 @@ class CandidatePresenterTests(unittest.TestCase):
 
         selected = presenter.select_candidate_for_preferences(
             candidates,
-            presenter.DownloadPreferences(quality="1080p", output_format="MP4", codec="?먮룞", frame_rate="?먮룞"),
+            presenter.DownloadPreferences(quality="1080p", output_format="MP4", codec="자동", frame_rate="자동"),
         )
 
         self.assertEqual(selected["id"], "direct-1080")
@@ -237,7 +237,7 @@ class CandidatePresenterTests(unittest.TestCase):
         rows = presenter.group_candidates(candidates)
         selected = presenter.select_candidate_for_preferences(
             rows[0]["qualities"],
-            presenter.DownloadPreferences(quality="1080p", output_format="MP4", codec="?먮룞", frame_rate="?먮룞"),
+            presenter.DownloadPreferences(quality="1080p", output_format="MP4", codec="자동", frame_rate="자동"),
         )
 
         self.assertEqual([candidate["id"] for candidate in rows[0]["qualities"]], ["hls-1080"])
