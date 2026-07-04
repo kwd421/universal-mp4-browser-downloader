@@ -1410,12 +1410,19 @@ def fetch_binary_url(url, referer=None, timeout=20, headers=None, max_bytes=MAX_
                 headers=request_headers,
                 impersonate="chrome",
                 timeout=timeout,
+                stream=True,
             )
             response.raise_for_status()
-            content = response.content
-            if len(content) > max_bytes:
-                raise RuntimeError(f"Response too large: > {max_bytes} bytes")
-            return content, response.headers.get("Content-Type") or ""
+            chunks = []
+            total = 0
+            for block in response.iter_content(chunk_size=64 * 1024):
+                if not block:
+                    continue
+                total += len(block)
+                if total > max_bytes:
+                    raise RuntimeError(f"Response too large: > {max_bytes} bytes")
+                chunks.append(block)
+            return b"".join(chunks), response.headers.get("Content-Type") or ""
         except Exception:
             raise urllib_exc
 

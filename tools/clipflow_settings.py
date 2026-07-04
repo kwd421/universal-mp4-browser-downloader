@@ -6,8 +6,8 @@ imports below plus methods that remain on the window class or other mixins.
 """
 
 import json
-import re
 import threading
+import urllib.parse
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QStandardPaths, Qt, QTimer
@@ -69,17 +69,36 @@ DOWNLOAD_HISTORY_MAX_ENTRIES = 100
 
 # Query-string keys that commonly carry signed-URL / CDN tokens. Stripped from
 # history entries so persisting completed downloads does not leak credentials.
-_SIGNED_QUERY_TOKEN_RE = re.compile(
-    r"([?&])(?:token|signature|sig|expires|expire|exp|x-amz-signature|x-amz-credential|x-amz-date|x-amz-expires|x-amz-security-token|x-amz-signedheaders)(?:=[^&#]*)",
-    re.IGNORECASE,
-)
+_SIGNED_QUERY_KEYS = {
+    "token",
+    "signature",
+    "sig",
+    "expires",
+    "expire",
+    "exp",
+    "x-amz-signature",
+    "x-amz-credential",
+    "x-amz-date",
+    "x-amz-expires",
+    "x-amz-security-token",
+    "x-amz-signedheaders",
+}
 
 
 def _strip_signed_url_tokens(value):
-    text = str(value or "")
+    text = str(value or "").strip()
     if not text:
         return ""
-    return _SIGNED_QUERY_TOKEN_RE.sub("", text)
+    parsed = urllib.parse.urlsplit(text)
+    if not parsed.query:
+        return text
+    kept = [
+        (key, val)
+        for key, val in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() not in _SIGNED_QUERY_KEYS
+    ]
+    query = urllib.parse.urlencode(kept, doseq=True)
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment))
 
 
 class SettingsMixin:

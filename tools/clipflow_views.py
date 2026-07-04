@@ -43,7 +43,7 @@ class RenderMixin:
         try:
             self._sort_rows()
             row_widgets = []
-            for row_index, row in enumerate(self.rows):
+            for row in self.rows:
                 widget = row.get("widget")
                 if widget is None:
                     widget = DownloadRowWidget(self, row)

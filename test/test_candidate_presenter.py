@@ -331,6 +331,19 @@ class CandidatePresenterTests(unittest.TestCase):
 
         self.assertIsNone(selected)
 
+    def test_select_candidate_specific_quality_ignores_unknown_height_for_target_filter(self):
+        candidates = [
+            {"id": "known-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1", "sort_bytes": 100},
+            {"id": "unknown", "output_ext": "mp4", "height": 0, "fps": 30, "vcodec": "avc1", "sort_bytes": 200},
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="720p", output_format="MP4", codec="자동", frame_rate="자동"),
+        )
+
+        self.assertEqual(selected["id"], "known-1080")
+
     def test_select_candidate_specific_quality_uses_nearest_lower_then_best_same_family(self):
         candidates = [
             {"id": "1440", "output_ext": "mp4", "height": 1440, "fps": 30, "vcodec": "avc1", "sort_bytes": 200},
