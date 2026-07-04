@@ -47,9 +47,11 @@ class ClipFlowUpdaterTests(unittest.TestCase):
                     self.assertEqual(updater.updater_app_version(), "1.2.3")
                     self.assertEqual(updater.updater_build_number(), "123")
 
-    def test_updater_configured_requires_feed_and_public_key(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(updater.updater_configured())
+    def test_updater_configured_requires_feed_url(self):
+        with mock.patch.object(updater.sys, "platform", "win32"):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                with mock.patch.object(updater, "_frozen_build_value", return_value=""):
+                    self.assertTrue(updater.updater_configured())
         with mock.patch.dict(
             os.environ,
             {
@@ -59,6 +61,29 @@ class ClipFlowUpdaterTests(unittest.TestCase):
             clear=False,
         ):
             self.assertTrue(updater.updater_configured())
+            self.assertTrue(updater.winsparkle_installer_ready())
+
+    def test_startup_update_is_available_uses_feed_fallbacks(self):
+        with mock.patch.object(updater, "updater_feed_url", return_value=""), mock.patch.object(
+            updater, "_latest_appcast_build_number", side_effect=[Exception("pages down"), 105]
+        ), mock.patch.object(updater, "updater_build_number", return_value="104"):
+            self.assertTrue(updater.startup_update_is_available())
+
+    def test_start_winsparkle_updater_returns_http_checker_without_installer_key(self):
+        baked = mock.Mock(
+            FEED_URL="https://example.test/windows.xml",
+            PUBLIC_ED_KEY="",
+            VERSION="1.0.4",
+            BUILD_NUMBER="104",
+        )
+        with mock.patch.object(updater.sys, "frozen", True, create=True), mock.patch.object(
+            updater.sys, "platform", "win32"
+        ), mock.patch.object(updater, "_frozen_build_config", return_value=baked), mock.patch.object(
+            updater, "_load_winsparkle_library", return_value=None
+        ):
+            instance = updater.start_winsparkle_updater()
+        self.assertIsNotNone(instance)
+        self.assertIsNone(instance._library)
 
     def test_start_app_updater_returns_none_in_dev_mode(self):
         with mock.patch.object(updater.sys, "frozen", False, create=True):
@@ -91,9 +116,7 @@ class ClipFlowUpdaterTests(unittest.TestCase):
             return mock.Mock()
 
         on_found = lambda: seen.append(True)
-        with mock.patch.object(updater, "_latest_appcast_build_number", return_value=104), mock.patch.object(
-            updater, "_build_number_int", return_value=102
-        ), mock.patch.object(updater, "updater_feed_url", return_value="https://example.test/appcast.xml"), mock.patch.object(
+        with mock.patch.object(updater, "startup_update_is_available", return_value=True), mock.patch.object(
             updater, "_dispatch_to_main_thread", side_effect=lambda callback: callback()
         ), mock.patch.object(updater.threading, "Thread", side_effect=run_worker_immediately):
             instance.schedule_startup_check(on_found)

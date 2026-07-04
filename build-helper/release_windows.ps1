@@ -107,15 +107,18 @@ function Update-WindowsAppcast {
         [string]$ItemXml
     )
     $content = Get-Content -Path $AppcastPath -Raw
-    if ($content -match [regex]::Escape("<title>$Version</title>")) {
-        throw "docs/appcast-windows.xml already contains version $Version"
+    $itemPattern = '(?s)\s*<item>\s*<title>' + [regex]::Escape($Version) + '</title>.*?</item>'
+    if ($content -match $itemPattern) {
+        $updated = [regex]::Replace($content, $itemPattern, "`r`n$ItemXml", 1)
     }
-    $updated = [regex]::Replace(
-        $content,
-        '(<channel>\s*<title>ClipFlow</title>)',
-        "`$1`r`n$ItemXml",
-        1
-    )
+    else {
+        $updated = [regex]::Replace(
+            $content,
+            '(<channel>\s*<title>ClipFlow</title>)',
+            "`$1`r`n$ItemXml",
+            1
+        )
+    }
     if ($updated -eq $content) {
         throw "Could not insert a new item into $AppcastPath"
     }

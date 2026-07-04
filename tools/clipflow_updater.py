@@ -15,6 +15,8 @@ from pathlib import Path
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 SPARKLE_VERSION_TAG = f"{{{SPARKLE_NS}}}version"
 
+DEFAULT_WINDOWS_FEED_URL = "https://kwd421.github.io/ClipFlow/appcast-windows.xml"
+FALLBACK_WINDOWS_FEED_URL = "https://raw.githubusercontent.com/kwd421/ClipFlow/main/docs/appcast-windows.xml"
 
 APP_VENDOR = "ClipFlow"
 APP_NAME = "ClipFlow"
@@ -56,6 +58,19 @@ def updater_feed_url():
     return value or _frozen_build_value("FEED_URL")
 
 
+def updater_feed_url_candidates():
+    candidates = []
+    for value in (
+        updater_feed_url(),
+        DEFAULT_WINDOWS_FEED_URL if sys.platform == "win32" else "",
+        FALLBACK_WINDOWS_FEED_URL if sys.platform == "win32" else "",
+    ):
+        text = str(value or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+    return candidates
+
+
 def updater_public_ed_key():
     return _updater_env("CLIPFLOW_SPARKLE_PUBLIC_ED_KEY") or _frozen_build_value("PUBLIC_ED_KEY")
 
@@ -73,6 +88,10 @@ def updater_build_number():
 
 
 def updater_configured():
+    return bool(updater_feed_url_candidates())
+
+
+def winsparkle_installer_ready():
     return bool(updater_feed_url() and updater_public_ed_key())
 
 
@@ -101,6 +120,20 @@ def _latest_appcast_build_number(feed_url):
     if version is None or not version.text:
         return None
     return int(version.text.strip())
+
+
+def startup_update_is_available():
+    current = _build_number_int(updater_build_number())
+    if current is None:
+        return False
+    for feed_url in updater_feed_url_candidates():
+        try:
+            latest = _latest_appcast_build_number(feed_url)
+        except Exception:
+            continue
+        if latest is not None and latest > current:
+            return True
+    return False
 
 
 def _dispatch_to_main_thread(callback):
@@ -253,20 +286,16 @@ class WinSparkleUpdater:
 
         def worker():
             try:
-                feed_url = updater_feed_url()
-                if not feed_url:
-                    return
-                latest = _latest_appcast_build_number(feed_url)
-                current = _build_number_int(updater_build_number())
-                if latest is None or current is None or latest <= current:
-                    return
-                _dispatch_to_main_thread(self._on_found)
+                if startup_update_is_available():
+                    _dispatch_to_main_thread(self._on_found)
             except Exception:
                 pass
 
         threading.Thread(target=worker, name="clipflow-update-check", daemon=True).start()
 
     def check_for_updates(self):
+        if self._library is None:
+            return
         self._library.win_sparkle_check_update_with_ui()
 
 
@@ -315,28 +344,21 @@ def _request_app_shutdown():
         app.quit()
 
 
-def start_winsparkle_updater():
-    if not getattr(sys, "frozen", False):
-        return None
-    if not updater_configured():
-        return None
-
-    library = _load_winsparkle_library()
-    if library is None:
-        return None
+def _init_winsparkle_library(library):
+    if not winsparkle_installer_ready():
+        return None, []
 
     _bind_winsparkle_api(library)
     feed_url = updater_feed_url().encode("utf-8")
     public_key = updater_public_ed_key().encode("ascii")
     if not library.win_sparkle_set_eddsa_public_key(public_key):
-        return None
+        return None, []
 
     library.win_sparkle_set_appcast_url(feed_url)
     library.win_sparkle_set_app_details(APP_VENDOR, APP_NAME, updater_app_version())
     library.win_sparkle_set_app_build_version(updater_build_number())
     library.win_sparkle_set_automatic_check_for_updates(0)
 
-    updater = WinSparkleUpdater(library)
     callbacks = []
 
     @_winsparkle_int_callback_type()
@@ -347,17 +369,28 @@ def start_winsparkle_updater():
     def shutdown_request():
         _request_app_shutdown()
 
-    @_winsparkle_void_callback_type()
-    def did_find_update():
-        _dispatch_to_main_thread(updater._on_found)
-
-    callbacks.extend([can_shutdown, shutdown_request, did_find_update])
+    callbacks.extend([can_shutdown, shutdown_request])
     library.win_sparkle_set_can_shutdown_callback(can_shutdown)
     library.win_sparkle_set_shutdown_request_callback(shutdown_request)
-    library.win_sparkle_set_did_find_update_callback(did_find_update)
     library.win_sparkle_init()
     atexit.register(library.win_sparkle_cleanup)
+    return library, callbacks
 
+
+def start_winsparkle_updater():
+    if not getattr(sys, "frozen", False):
+        return None
+    if not updater_configured():
+        return None
+
+    library = _load_winsparkle_library()
+    callbacks = []
+    if library is not None:
+        library, callbacks = _init_winsparkle_library(library)
+        if library is None:
+            callbacks = []
+
+    updater = WinSparkleUpdater(library)
     updater._callbacks = callbacks
     return updater
 
