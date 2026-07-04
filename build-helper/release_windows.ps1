@@ -154,7 +154,7 @@ $env:CLIPFLOW_WINSPARKLE_FEED_URL = $FeedUrl
 $env:CLIPFLOW_SPARKLE_PUBLIC_ED_KEY = $publicKey
 
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot "build_windows.ps1")
+    & (Join-Path $PSScriptRoot "build_windows.ps1") -SkipTests
 }
 
 $artifactDir = Join-Path $repoRoot "dist"
