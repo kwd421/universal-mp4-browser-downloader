@@ -74,9 +74,20 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          $staging = Join-Path $env:RUNNER_TEMP "clipflow-appcast-publish"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item docs/appcast-windows.xml $staging/
+          Copy-Item "docs/ClipFlow-$env:CLIPFLOW_VERSION.md" $staging/
+          if (Test-Path docs/.nojekyll) {
+            Copy-Item docs/.nojekyll $staging/
+          } else {
+            New-Item -ItemType File -Force -Path (Join-Path $staging ".nojekyll") | Out-Null
+          }
           git fetch origin main
-          git checkout main
-          git checkout "${{ github.sha }}" -- docs/appcast-windows.xml "docs/ClipFlow-$env:CLIPFLOW_VERSION.md" docs/.nojekyll
+          git checkout -B main origin/main
+          Copy-Item (Join-Path $staging "appcast-windows.xml") docs/appcast-windows.xml -Force
+          Copy-Item (Join-Path $staging "ClipFlow-$env:CLIPFLOW_VERSION.md") "docs/ClipFlow-$env:CLIPFLOW_VERSION.md" -Force
+          Copy-Item (Join-Path $staging ".nojekyll") docs/.nojekyll -Force
           git add docs/appcast-windows.xml "docs/ClipFlow-$env:CLIPFLOW_VERSION.md" docs/.nojekyll
           if (git diff --cached --quiet) {
             Write-Host "No appcast changes to publish"
