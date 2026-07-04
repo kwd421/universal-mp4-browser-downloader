@@ -121,6 +121,9 @@ for package in ("imageio_ffmpeg", "yt_dlp_ejs", "curl_cffi"):
     binaries += tmp_ret[1]
     hiddenimports += tmp_ret[2]
 
+if sys.platform.startswith("win") and WINSPARKLE_DLL.exists():
+    binaries.append((str(WINSPARKLE_DLL), "."))
+
 
 a = Analysis(
     [str(ENTRYPOINT)],
@@ -177,8 +180,6 @@ if sys.platform == "darwin":
         info_plist=mac_info_plist(),
     )
 else:
-    if sys.platform.startswith("win") and WINSPARKLE_DLL.exists():
-        binaries.append((str(WINSPARKLE_DLL), "."))
     # Windows/Linux: onefile (single distributable executable).
     exe = EXE(
         pyz,

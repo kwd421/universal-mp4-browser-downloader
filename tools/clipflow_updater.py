@@ -182,6 +182,9 @@ def _winsparkle_dll_candidates():
     root = Path(__file__).resolve().parent.parent
     candidates = []
     if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "WinSparkle.dll")
         candidates.append(Path(sys.executable).resolve().parent / "WinSparkle.dll")
     candidates.extend(
         [
