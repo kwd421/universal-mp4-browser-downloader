@@ -102,7 +102,10 @@ def verify_resolution(candidate, candidates, mp4_path, min_height):
     actual_width, actual_height = engine.probe_video_resolution(mp4_path)
     actual_max = max(actual_width, actual_height)
     best_height = best_available_height(candidates)
-    expected_floor = min_height
+    effective_min = min_height
+    if best_height and best_height < min_height:
+        effective_min = best_height
+    expected_floor = effective_min
     if best_height:
         expected_floor = max(expected_floor, int(best_height * 0.85))
     if selected_height:

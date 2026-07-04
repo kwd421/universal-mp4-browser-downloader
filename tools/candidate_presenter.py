@@ -147,6 +147,15 @@ def _downloadable_score(candidate):
     return 0 if candidate.get("download_risk") else 1
 
 
+def _browser_remote_mp4_api_score(candidate):
+    if candidate.get("is_manifest"):
+        return 0
+    url = str(candidate.get("url") or "").lower()
+    if "/media/hls" in url:
+        return 0
+    return 1 if engine.is_browser_remote_media_api_url(candidate.get("url")) else 0
+
+
 def _target_height(quality):
     text = str(quality or "").strip().lower()
     if _is_best_quality(text):
@@ -211,9 +220,10 @@ def _best_candidate(candidates, preferences):
         codec = _codec_name(candidate)
         codec_score = 0 if codec_auto and quality_auto else _stable_video_codec_score(candidate) if codec_auto else (1 if codec == target_codec else 0)
         direct_score = 1 if not candidate.get("is_manifest") and size > 0 else 0
+        remote_api_score = _browser_remote_mp4_api_score(candidate)
         if codec_auto and quality_auto:
-            return (_downloadable_score(candidate), height, fps, direct_score, _stable_audio_codec_score(candidate), size, codec_score)
-        return (_downloadable_score(candidate), codec_score, height, fps, direct_score, _stable_audio_codec_score(candidate), size)
+            return (_downloadable_score(candidate), remote_api_score, height, fps, direct_score, _stable_audio_codec_score(candidate), size, codec_score)
+        return (_downloadable_score(candidate), remote_api_score, codec_score, height, fps, direct_score, _stable_audio_codec_score(candidate), size)
 
     return max(candidates, key=score) if candidates else None
 

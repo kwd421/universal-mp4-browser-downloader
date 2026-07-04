@@ -1776,6 +1776,29 @@ for line in sys.stdin:
         self.assertEqual(result["candidates"][0]["url"], "https://www.redtube.com/media/mp4?s=token")
         self.assertFalse(result["candidates"][0]["is_manifest"])
 
+    def test_prepare_browser_dom_candidate_auto_quality_picks_highest_remote_api_entry(self):
+        candidate = {
+            "format_id": "browser-mp4",
+            "url": "https://www.redtube.com/media/mp4?s=token",
+            "height": 0,
+            "source": "https://www.redtube.com/198689351",
+        }
+        payload = [
+            {"quality": "240", "videoUrl": "https://cdn.example.test/240.mp4"},
+            {"quality": "720", "videoUrl": "https://cdn.example.test/720.mp4"},
+            {"quality": "1080", "videoUrl": "https://cdn.example.test/1080.mp4"},
+        ]
+
+        with mock.patch.object(
+            engine,
+            "refresh_browser_dom_candidate_media",
+            side_effect=lambda page_url, candidate, on_event=None: dict(candidate),
+        ), mock.patch.object(engine, "fetch_json_via_browser", return_value=payload):
+            prepared = engine.prepare_browser_dom_candidate("https://www.redtube.com/198689351", candidate)
+
+        self.assertEqual(prepared["url"], "https://cdn.example.test/1080.mp4")
+        self.assertEqual(prepared["height"], 1080)
+
     def test_prepare_browser_dom_candidate_resolves_remote_api_url(self):
         candidate = {
             "format_id": "browser-480",

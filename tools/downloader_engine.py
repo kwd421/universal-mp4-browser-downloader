@@ -2980,9 +2980,19 @@ def prepare_browser_dom_candidate(page_url, candidate, on_event=None):
                 picked = entry
                 break
     if not picked:
-        picked = min(
-            (entry for entry in entries if isinstance(entry, dict)),
-            key=lambda entry: safe_int(entry.get("quality") or entry.get("height") or 9999),
+        valid_entries = [entry for entry in entries if isinstance(entry, dict)]
+        if target_height:
+            at_or_below = [
+                entry
+                for entry in valid_entries
+                if safe_int(entry.get("quality") or entry.get("height")) <= target_height
+            ]
+            pool = at_or_below or valid_entries
+        else:
+            pool = valid_entries
+        picked = max(
+            pool,
+            key=lambda entry: safe_int(entry.get("quality") or entry.get("height") or 0),
             default=None,
         )
     if not picked:

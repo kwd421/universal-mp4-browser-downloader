@@ -188,6 +188,33 @@ class CandidatePresenterTests(unittest.TestCase):
 
         self.assertEqual(selected["id"], "sdr-2160")
 
+    def test_select_candidate_auto_prefers_remote_mp4_api_over_hls_manifest(self):
+        candidates = [
+            {
+                "id": "browser-hls",
+                "output_ext": "mp4",
+                "height": 0,
+                "sort_bytes": 0,
+                "is_manifest": True,
+                "url": "https://www.redtube.com/media/hls?s=token",
+            },
+            {
+                "id": "browser-mp4",
+                "output_ext": "mp4",
+                "height": 0,
+                "sort_bytes": 0,
+                "is_manifest": False,
+                "url": "https://www.redtube.com/media/mp4?s=token",
+            },
+        ]
+
+        selected = presenter.select_candidate_for_preferences(
+            candidates,
+            presenter.DownloadPreferences(quality="자동", output_format="자동", codec="자동", frame_rate="자동"),
+        )
+
+        self.assertEqual(selected["id"], "browser-mp4")
+
     def test_select_candidate_prefers_direct_https_over_manifest_at_same_quality(self):
         candidates = [
             {"id": "hls-1080", "output_ext": "mp4", "height": 1080, "fps": 30, "vcodec": "avc1.640028", "acodec": "mp4a.40.2", "sort_bytes": 50_000_000, "is_manifest": True, "protocol": "m3u8_native"},
