@@ -2396,9 +2396,15 @@ for line in sys.stdin:
             playlist_lines.append(f"seg{index}.ts")
             payloads[f"https://cdn.example.test/seg{index}.ts"] = f"SEG{index}".encode()
         playlist = "\n".join(playlist_lines) + "\n"
-        peak_in_flight = {"value": 0}
-        active = {"count": 0}
-        lock = threading.Lock()
+        pipeline_peaks = {"in_flight": 0, "pending": 0, "temp_segments": 0}
+
+        def observe_pipeline(in_flight_count, pending_count):
+            pipeline_peaks["in_flight"] = max(pipeline_peaks["in_flight"], in_flight_count)
+            pipeline_peaks["pending"] = max(pipeline_peaks["pending"], pending_count)
+            pipeline_peaks["temp_segments"] = max(
+                pipeline_peaks["temp_segments"],
+                in_flight_count + pending_count,
+            )
 
         def fake_resolve(url, headers):
             del url, headers
@@ -2406,9 +2412,7 @@ for line in sys.stdin:
 
         def fake_urlopen(request, timeout=45):
             del timeout
-            with lock:
-                active["count"] += 1
-                peak_in_flight["value"] = max(peak_in_flight["value"], active["count"])
+            time.sleep(0.02)
 
             class Response:
                 def __init__(self, payload):
@@ -2427,8 +2431,6 @@ for line in sys.stdin:
                     return self
 
                 def __exit__(self, exc_type, exc, tb):
-                    with lock:
-                        active["count"] -= 1
                     del exc_type, exc, tb
 
             return Response(payloads[request.full_url])
@@ -2441,6 +2443,7 @@ for line in sys.stdin:
         original_urlopen = engine.parallel_http_urlopen
         original_remux = engine.remux_ts_file_to_mp4
         try:
+            engine.set_hls_parallel_pipeline_observer(observe_pipeline)
             engine.resolve_hls_media_playlist = fake_resolve
             engine.parallel_http_urlopen = fake_urlopen
             engine.remux_ts_file_to_mp4 = fake_remux
@@ -2461,8 +2464,15 @@ for line in sys.stdin:
                 self.assertTrue(body.endswith(b"-MP4"))
                 expected = b"".join(payloads[f"https://cdn.example.test/seg{index}.ts"] for index in range(segment_count))
                 self.assertEqual(body[:-4], expected)
-                self.assertLessEqual(peak_in_flight["value"], engine.HLS_PARALLEL_MAX_IN_FLIGHT)
+                self.assertGreater(pipeline_peaks["in_flight"], 1)
+                self.assertLessEqual(pipeline_peaks["in_flight"], engine.HLS_PARALLEL_MAX_IN_FLIGHT)
+                self.assertLess(pipeline_peaks["temp_segments"], segment_count)
+                self.assertLessEqual(
+                    pipeline_peaks["temp_segments"],
+                    engine.HLS_PARALLEL_MAX_IN_FLIGHT * 2,
+                )
         finally:
+            engine.clear_hls_parallel_pipeline_observer()
             engine.resolve_hls_media_playlist = original_resolve
             engine.parallel_http_urlopen = original_urlopen
             engine.remux_ts_file_to_mp4 = original_remux

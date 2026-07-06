@@ -59,13 +59,13 @@ BROWSER_DOM_HLS_PARALLEL_MAX_BYTES = 64 * 1024 * 1024
 BROWSER_DOM_HLS_PARALLEL_MAX_SEGMENTS = 240
 # HLS parallel: workers = concurrent segment fetches; max_in_flight caps queued futures
 # and temp files so multi-hour VODs do not retain all segments in RAM.
-HLS_PARALLEL_WORKERS = 32
-HLS_PARALLEL_MAX_IN_FLIGHT = 64
-HLS_SEGMENT_READ_CHUNK = 512 * 1024
+HLS_PARALLEL_WORKERS = 56
+HLS_PARALLEL_MAX_IN_FLIGHT = 56
+HLS_SEGMENT_READ_CHUNK = 1024 * 1024
 HLS_PARALLEL_PROGRESS_INTERVAL = 0.25
-YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS = 24
+YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS = 32
 YTDLP_HTTP_CHUNK_SIZE = 10 * 1024 * 1024
-_PARALLEL_HTTP_SESSION_LOCAL = threading.local()
+_HLS_PARALLEL_PIPELINE_OBSERVER = None
 _BROWSER_DOM_HTML_CACHE = {}
 COOKIE_SOURCES = {
     "chrome": ("chrome",),
@@ -4229,82 +4229,9 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
     }
 
 
-class _CurlResponseWrapper:
-    def __init__(self, response):
-        self._response = response
-        self._iter = response.iter_content()
-        self._buffer = b""
-        self.headers = response.headers
-        self.status = response.status_code
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        del exc_type, exc, tb
-        self.close()
-        return False
-
-    def read(self, size=-1):
-        if size is None or size < 0:
-            chunks = []
-            if self._buffer:
-                chunks.append(self._buffer)
-                self._buffer = b""
-            for chunk in self._iter:
-                if chunk:
-                    chunks.append(chunk)
-            self.close()
-            return b"".join(chunks)
-        while len(self._buffer) < size:
-            try:
-                chunk = next(self._iter)
-            except StopIteration:
-                break
-            if chunk:
-                self._buffer += chunk
-        result = self._buffer[:size]
-        self._buffer = self._buffer[size:]
-        return result
-
-    def close(self):
-        response = getattr(self, "_response", None)
-        if response is not None:
-            self._response = None
-            response.close()
-
-
-def _parallel_http_session():
-    session = getattr(_PARALLEL_HTTP_SESSION_LOCAL, "session", None)
-    if session is not None:
-        return session if session is not False else None
-    try:
-        apply_curl_cffi_system_dns_patch()
-        from curl_cffi import requests as curl_requests
-
-        session = curl_requests.Session(impersonate="chrome")
-    except ImportError:
-        session = False
-    _PARALLEL_HTTP_SESSION_LOCAL.session = session
-    return session if session is not False else None
-
-
 def parallel_http_urlopen(request, timeout=30):
-    session = _parallel_http_session()
-    if session is None:
-        return urllib.request.urlopen(request, timeout=timeout)
-    url = request.full_url if hasattr(request, "full_url") else request.get_full_url()
-    headers = dict(request.header_items()) if hasattr(request, "header_items") else dict(request.headers)
-    response = session.get(url, headers=headers, timeout=timeout, stream=True)
-    if safe_int(getattr(response, "status_code", 200)) >= 400:
-        raise urllib.error.HTTPError(
-            url,
-            safe_int(response.status_code),
-            getattr(response, "reason", ""),
-            response.headers,
-            None,
-        )
-    return _CurlResponseWrapper(response)
+    # Parallel download paths use urllib: curl_cffi is not safe under ThreadPoolExecutor on Windows.
+    return urllib.request.urlopen(request, timeout=timeout)
 
 
 def fetch_hls_playlist_text(url, headers, timeout=30):
@@ -4619,6 +4546,22 @@ def append_hls_segment_file(output_file, segment_path):
         shutil.copyfileobj(segment_file, output_file, HLS_SEGMENT_READ_CHUNK)
 
 
+def set_hls_parallel_pipeline_observer(callback):
+    global _HLS_PARALLEL_PIPELINE_OBSERVER
+    _HLS_PARALLEL_PIPELINE_OBSERVER = callback
+
+
+def clear_hls_parallel_pipeline_observer():
+    global _HLS_PARALLEL_PIPELINE_OBSERVER
+    _HLS_PARALLEL_PIPELINE_OBSERVER = None
+
+
+def _notify_hls_parallel_pipeline(in_flight_count, pending_count):
+    observer = _HLS_PARALLEL_PIPELINE_OBSERVER
+    if observer:
+        observer(in_flight_count, pending_count)
+
+
 def emit_hls_parallel_progress(
     on_event,
     candidate,
@@ -4728,6 +4671,7 @@ def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=
                     future = executor.submit(fetch_segment, index, segment_urls[index])
                     in_flight[future] = index
                     next_submit_index += 1
+                    _notify_hls_parallel_pipeline(len(in_flight), len(pending_paths))
 
                 while in_flight:
                     done, _pending = concurrent.futures.wait(
@@ -4738,6 +4682,7 @@ def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=
                         del in_flight[future]
                         index, segment_path = future.result()
                         pending_paths[index] = segment_path
+                        _notify_hls_parallel_pipeline(len(in_flight), len(pending_paths))
                         while next_write_index in pending_paths:
                             segment_file = pending_paths[next_write_index]
                             segment_size = segment_file.stat().st_size
@@ -4750,11 +4695,12 @@ def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=
                             except OSError:
                                 pass
                             next_write_index += 1
-                        if next_submit_index < total_segments:
+                        while next_submit_index < total_segments and len(in_flight) < max_in_flight:
                             submit_index = next_submit_index
                             new_future = executor.submit(fetch_segment, submit_index, segment_urls[submit_index])
                             in_flight[new_future] = submit_index
                             next_submit_index += 1
+                        _notify_hls_parallel_pipeline(len(in_flight), len(pending_paths))
                         last_emit_at, last_emit_bytes = emit_hls_parallel_progress(
                             on_event,
                             candidate,
