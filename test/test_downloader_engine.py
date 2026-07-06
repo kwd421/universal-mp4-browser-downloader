@@ -3180,6 +3180,81 @@ for line in sys.stdin:
                 engine.chzzk_video_playback = original_playback
             engine.enrich_missing_sizes = original_enrich
 
+    def test_chzzk_direct_speed_is_slow_after_warmup(self):
+        total = 80 * 1024 * 1024 * 1024
+        self.assertFalse(engine.chzzk_direct_speed_is_slow(100_000_000, 10.0, total))
+        self.assertTrue(engine.chzzk_direct_speed_is_slow(100_000_000, 30.0, total))
+
+    def test_download_chzzk_falls_back_to_hls_when_direct_is_slow(self):
+        events = []
+        hls_urls = []
+        original_direct = engine.download_direct_media
+        original_hls = engine.download_hls_parallel
+        original_alt = engine.chzzk_alternative_hls_candidate
+        original_total = engine.resolve_direct_media_total
+
+        candidate = {
+            "url": "https://cdn.example.test/vod.mp4",
+            "source": "https://chzzk.naver.com/video/14056968",
+            "format_id": "chzzk-1080",
+            "title": "VOD",
+            "output_ext": "mp4",
+            "ext": "mp4",
+            "height": 1080,
+        }
+
+        def fake_direct(url, cand, output_dir, on_event=None, slow_check=None):
+            del url, cand, output_dir, on_event
+            if slow_check:
+                slow_check(100_000_000, 30.0)
+
+        def fake_alt(cand, page_url, cookie_source, on_event=None):
+            del page_url, cookie_source, on_event
+            return {**cand, "url": "https://cdn.example.test/vod.m3u8", "is_manifest": True}
+
+        def fake_hls(url, cand, output_dir, on_event=None):
+            del cand, on_event
+            hls_urls.append(url)
+            output_path = Path(output_dir) / "VOD.mp4"
+            output_path.write_bytes(b"hls")
+            return {
+                "ok": True,
+                "output_dir": output_dir,
+                "output_path": str(output_path),
+                "target_url": url,
+            }
+
+        def fake_total(url, headers, cand):
+            del url, headers, cand
+            return 80 * 1024 * 1024 * 1024
+
+        try:
+            engine.download_direct_media = fake_direct
+            engine.chzzk_alternative_hls_candidate = fake_alt
+            engine.download_hls_parallel = fake_hls
+            engine.resolve_direct_media_total = fake_total
+            with tempfile.TemporaryDirectory() as temp:
+                result = engine.download_chzzk_candidate(
+                    "https://chzzk.naver.com/video/14056968",
+                    candidate,
+                    temp,
+                    on_event=events.append,
+                )
+            self.assertEqual(hls_urls, ["https://cdn.example.test/vod.m3u8"])
+            self.assertTrue(result["output_path"].endswith("VOD.mp4"))
+            self.assertTrue(
+                any(
+                    "switching to HLS" in str(event.get("message") or "")
+                    for event in events
+                    if event.get("type") == "log"
+                )
+            )
+        finally:
+            engine.download_direct_media = original_direct
+            engine.download_hls_parallel = original_hls
+            engine.chzzk_alternative_hls_candidate = original_alt
+            engine.resolve_direct_media_total = original_total
+
     def test_download_candidate_uses_direct_http_for_chzzk_mp4_candidates(self):
         calls = []
         original_direct = getattr(engine, "download_direct_media", None)
@@ -3188,7 +3263,8 @@ for line in sys.stdin:
             def __init__(self, options):
                 raise AssertionError("yt-dlp should not run for CHZZK direct MP4 candidates")
 
-        def fake_direct(url, candidate, output_dir, on_event=None):
+        def fake_direct(url, candidate, output_dir, on_event=None, slow_check=None):
+            del slow_check
             calls.append((url, candidate["title"], output_dir))
             output_path = Path(output_dir) / "독케익 - Clip.mp4"
             output_path.write_bytes(b"video")

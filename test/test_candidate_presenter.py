@@ -281,7 +281,7 @@ class CandidatePresenterTests(unittest.TestCase):
 
         self.assertEqual([candidate["id"] for candidate in filtered], ["chzzk-direct", "chzzk-hls"])
 
-    def test_group_candidates_keeps_chzzk_direct_and_hls_at_same_resolution(self):
+    def test_group_candidates_collapses_chzzk_direct_and_hls_to_auto_entry(self):
         candidates = [
             {
                 "id": "chzzk-direct",
@@ -317,10 +317,10 @@ class CandidatePresenterTests(unittest.TestCase):
 
         rows = presenter.group_candidates(candidates)
 
-        self.assertEqual([candidate["id"] for candidate in rows[0]["qualities"]], ["chzzk-direct", "chzzk-hls"])
+        self.assertEqual([candidate["id"] for candidate in rows[0]["qualities"]], ["chzzk-direct"])
 
-    def test_chzzk_quality_label_shows_delivery_kind(self):
-        direct_label = presenter.quality_label(
+    def test_chzzk_quality_label_shows_auto_route(self):
+        label = presenter.quality_label(
             {
                 "format_id": "chzzk-mp4-1080",
                 "source": "https://chzzk.naver.com/video/1",
@@ -330,20 +330,8 @@ class CandidatePresenterTests(unittest.TestCase):
                 "url": "https://cdn.example.test/vod.mp4",
             }
         )
-        hls_label = presenter.quality_label(
-            {
-                "format_id": "chzzk-hls-1080",
-                "source": "https://chzzk.naver.com/video/1",
-                "output_ext": "mp4",
-                "resolution": "1080p",
-                "sort_bytes": 900_000,
-                "is_manifest": True,
-                "url": "https://cdn.example.test/vod.m3u8",
-            }
-        )
 
-        self.assertIn("직접", direct_label)
-        self.assertIn("HLS", hls_label)
+        self.assertIn("자동", label)
 
     def test_group_candidates_dedupes_same_quality_using_downloadability(self):
         candidates = [

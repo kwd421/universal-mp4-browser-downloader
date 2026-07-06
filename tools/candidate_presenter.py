@@ -60,17 +60,11 @@ def candidate_visible_quality_key(candidate):
     media_type = candidate.get("media_type") or "video"
     if media_type == "audio" or ext == "wav":
         return ("audio", ext, candidate.get("note") or "")
-
-    delivery = ""
-    if _is_chzzk_candidate(candidate):
-        delivery = _delivery_kind(candidate)
-
     return (
         "video",
         ext,
         engine.safe_int(candidate.get("height")),
         engine.safe_int(candidate.get("fps")),
-        delivery,
     )
 
 
@@ -81,10 +75,8 @@ def quality_label(candidate):
         note = candidate.get("note") or "audio"
         return f"{ext} · {size} · {note}"
     resolution = candidate.get("resolution") or "unknown"
-    delivery = ""
-    if _is_chzzk_candidate(candidate):
-        delivery = " · HLS" if _delivery_kind(candidate) == "hls" else " · 직접"
-    return f"{resolution} · {ext} · {size}{delivery}"
+    auto = " · 자동" if _is_chzzk_candidate(candidate) else ""
+    return f"{resolution} · {ext} · {size}{auto}"
 
 
 def _normalized_format(candidate):
