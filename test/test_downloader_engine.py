@@ -2376,6 +2376,34 @@ for line in sys.stdin:
         self.assertEqual(mp4_candidates[0]["width"], 1920)
         self.assertEqual(mp4_candidates[0]["bandwidth"], 8202000)
 
+    def test_extract_chzzk_media_urls_reads_other_attributes_m3u(self):
+        payload = {
+            "period": [
+                {
+                    "adaptationSet": [
+                        {
+                            "representation": [
+                                {
+                                    "width": 1920,
+                                    "height": 1080,
+                                    "bandwidth": 5000000,
+                                    "otherAttributes": {
+                                        "m3u": "https://cdn.example.test/vod-1080.m3u8",
+                                    },
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+
+        mp4_candidates, hls_candidates = engine.extract_chzzk_media_urls(payload)
+
+        self.assertEqual(mp4_candidates, [])
+        self.assertEqual(hls_candidates[0]["url"], "https://cdn.example.test/vod-1080.m3u8")
+        self.assertEqual(hls_candidates[0]["height"], 1080)
+
     def test_is_chzzk_hls_candidate_detects_vod_manifest(self):
         self.assertTrue(
             engine.is_chzzk_hls_candidate(

@@ -2054,6 +2054,10 @@ def extract_chzzk_media_urls(card_payload):
             add_url(value.get("@nvod:m3u"), width, height, bandwidth, fps)
             add_url(value.get("source"), width, height, bitrate.get("video") or bandwidth, fps)
             add_url(value.get("path"), width, height, bandwidth, fps)
+            other_attrs = value.get("otherAttributes")
+            if isinstance(other_attrs, dict):
+                add_url(other_attrs.get("m3u"), width, height, bandwidth, fps)
+                add_url(other_attrs.get("m3u8"), width, height, bandwidth, fps)
             for child in value.values():
                 walk(child)
         elif isinstance(value, list):
