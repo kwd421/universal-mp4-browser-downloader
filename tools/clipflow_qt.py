@@ -1104,7 +1104,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
 
     def _show_clip_range_dialog(self, initial=None):
         dialog = QDialog(self)
-        dialog.setWindowTitle("구간 다운로드")
+        dialog.setWindowTitle("구간 추출")
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(12)
@@ -1125,7 +1125,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         buttons.addStretch(1)
         cancel = OutlinedButton("취소")
         cancel.setObjectName("SecondaryButton")
-        apply_button = OutlinedButton("다운로드")
+        apply_button = OutlinedButton("추출")
         apply_button.setObjectName("PrimaryPopupButton")
         apply_button.setDefault(True)
         apply_button.setAutoDefault(True)
