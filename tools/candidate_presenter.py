@@ -42,16 +42,35 @@ def candidate_quality_key(candidate):
     )
 
 
+def _is_chzzk_candidate(candidate):
+    try:
+        return engine.candidate_looks_chzzk(candidate, candidate.get("source") or candidate.get("url") or "")
+    except Exception:
+        return False
+
+
+def _delivery_kind(candidate):
+    if candidate.get("is_manifest") or ".m3u8" in str(candidate.get("url") or "").lower():
+        return "hls"
+    return "direct"
+
+
 def candidate_visible_quality_key(candidate):
     ext = str(candidate.get("output_ext") or candidate.get("ext") or "").lower()
     media_type = candidate.get("media_type") or "video"
     if media_type == "audio" or ext == "wav":
         return ("audio", ext, candidate.get("note") or "")
+
+    delivery = ""
+    if _is_chzzk_candidate(candidate):
+        delivery = _delivery_kind(candidate)
+
     return (
         "video",
         ext,
         engine.safe_int(candidate.get("height")),
         engine.safe_int(candidate.get("fps")),
+        delivery,
     )
 
 
@@ -62,7 +81,10 @@ def quality_label(candidate):
         note = candidate.get("note") or "audio"
         return f"{ext} · {size} · {note}"
     resolution = candidate.get("resolution") or "unknown"
-    return f"{resolution} · {ext} · {size}"
+    delivery = ""
+    if _is_chzzk_candidate(candidate):
+        delivery = " · HLS" if _delivery_kind(candidate) == "hls" else " · 직접"
+    return f"{resolution} · {ext} · {size}{delivery}"
 
 
 def _normalized_format(candidate):
@@ -276,6 +298,10 @@ def filter_manifest_duplicates(candidates):
 
     filtered = []
     for candidate in candidates:
+        if _is_chzzk_candidate(candidate):
+            filtered.append(candidate)
+            continue
+
         note = str(candidate.get("note") or "").lower()
         if _candidate_family(candidate) == "video" and candidate.get("is_manifest"):
             continue

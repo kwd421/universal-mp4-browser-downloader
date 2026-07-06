@@ -58,10 +58,24 @@ BROWSER_DOM_HTML_CACHE_MAX_AGE = 90.0
 BROWSER_DOM_HTML_CACHE_DOWNLOAD_MAX_AGE = 300.0
 BROWSER_DOM_HLS_PARALLEL_MAX_BYTES = 64 * 1024 * 1024
 BROWSER_DOM_HLS_PARALLEL_MAX_SEGMENTS = 240
+def _env_int(name, default, minimum=1, maximum=64):
+    try:
+        return max(minimum, min(maximum, int(os.environ.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
 # HLS parallel: workers = live TCP connections (keep low to avoid CDN throttle).
 # max_in_flight = queued futures; can exceed workers to keep the pipeline full.
-HLS_PARALLEL_WORKERS = 4
-HLS_PARALLEL_MAX_IN_FLIGHT = 16
+HLS_PARALLEL_WORKERS = _env_int("CLIPFLOW_HLS_WORKERS", 4, 1, 16)
+HLS_PARALLEL_MAX_IN_FLIGHT = _env_int(
+    "CLIPFLOW_HLS_MAX_IN_FLIGHT",
+    HLS_PARALLEL_WORKERS * 4,
+    HLS_PARALLEL_WORKERS,
+    128,
+)
+CHZZK_DIRECT_MEDIA_WORKERS = _env_int("CLIPFLOW_CHZZK_DIRECT_WORKERS", 8, 1, 16)
+CHZZK_DIRECT_MEDIA_PART_SIZE = _env_int("CLIPFLOW_CHZZK_DIRECT_PART_MB", 128, 1, 1024) * 1024 * 1024
 HLS_SEGMENT_READ_CHUNK = 1024 * 1024
 HLS_PARALLEL_PROGRESS_INTERVAL = 0.25
 HLS_SEGMENT_RETRIES = 3
@@ -1705,10 +1719,14 @@ def http_content_length(url, timeout=3, headers=None):
     try:
         request = urllib.request.Request(url, headers={**headers, "Range": "bytes=0-0"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = safe_int(getattr(response, "status", 0))
             ranged = parse_content_range(response.headers.get("Content-Range"))
             if ranged:
                 return ranged
-            return safe_int(response.headers.get("Content-Length"))
+            length = safe_int(response.headers.get("Content-Length"))
+            if status == 200 and length:
+                return length
+            return 0
     except (OSError, urllib.error.URLError, ValueError):
         return 0
 
@@ -4190,6 +4208,14 @@ def download_chzzk_candidate(page_url, candidate, output_dir, cookie_source="없
         if clip_range_from_candidate(candidate):
             return download_direct_media_segment(target_url, candidate, output_dir, on_event=on_event)
         return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
+    emit_event(
+        on_event,
+        "log",
+        message=(
+            f"CHZZK route=hls workers={HLS_PARALLEL_WORKERS} "
+            f"max_in_flight={HLS_PARALLEL_MAX_IN_FLIGHT} url_ext=hls"
+        ),
+    )
     return download_hls_parallel(target_url, candidate, output_dir, on_event=on_event)
 
 
@@ -4395,6 +4421,26 @@ def direct_media_parallel_part_size(total, workers=None):
     return max(DIRECT_MEDIA_PARALLEL_PART_SIZE, (total + workers - 1) // workers)
 
 
+def direct_media_worker_count(candidate):
+    if candidate_looks_chzzk(candidate, candidate.get("source") or ""):
+        return max(1, min(16, safe_int(CHZZK_DIRECT_MEDIA_WORKERS)))
+    return DIRECT_MEDIA_PARALLEL_WORKERS
+
+
+def direct_media_part_size_for_candidate(total, candidate, workers):
+    workers = max(1, safe_int(workers))
+    total = max(1, safe_int(total))
+    if candidate_looks_chzzk(candidate, candidate.get("source") or ""):
+        return max(
+            DIRECT_MEDIA_PARALLEL_PART_SIZE,
+            min(
+                CHZZK_DIRECT_MEDIA_PART_SIZE,
+                (total + workers * 4 - 1) // (workers * 4),
+            ),
+        )
+    return direct_media_parallel_part_size(total, workers=workers)
+
+
 def should_use_parallel_direct_download(url, headers, total):
     total = safe_int(total)
     if total <= 0:
@@ -4550,9 +4596,13 @@ def direct_media_parallel_proxy_url(url, headers, total, workers=None, part_size
         thread.join(timeout=2)
 
 
-def download_direct_media_parallel(url, output_path, headers, total, on_event=None, part_size=None):
+def download_direct_media_parallel(url, output_path, headers, total, on_event=None, part_size=None, workers=None):
+    worker_count = max(1, safe_int(workers or DIRECT_MEDIA_PARALLEL_WORKERS))
     part_path = output_path.with_name(output_path.name + ".part")
-    resolved_part_size = max(1, safe_int(part_size or direct_media_parallel_part_size(total)))
+    resolved_part_size = max(
+        1,
+        safe_int(part_size or direct_media_parallel_part_size(total, workers=worker_count)),
+    )
     downloaded = 0
     downloaded_lock = threading.Lock()
     progress_lock = threading.Lock()
@@ -4613,7 +4663,7 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
             (index, start, end, temp_root / f"seg_{index:08d}.part")
             for index, start, end in direct_media_ranges(total, part_size=resolved_part_size)
         ]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, safe_int(DIRECT_MEDIA_PARALLEL_WORKERS))) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
             completed = sorted(executor.map(download_range, ranges), key=lambda item: item[0])
         emit_event(on_event, "status", message="Finalizing direct download")
         with part_path.open("wb") as output_file:
@@ -4636,7 +4686,26 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
         raise RuntimeError("Direct media output path could not be determined.")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     headers = direct_media_request_headers(candidate)
-    total = resolve_direct_media_total(url, headers, candidate)
+    estimated = candidate_expected_size(candidate)
+    probed = http_content_length(url, headers=headers)
+    total = probed or estimated
+    if estimated and probed and estimated != probed:
+        emit_event(
+            on_event,
+            "log",
+            message=f"Direct size: estimated={display_size(estimated)}, probed={display_size(probed)}",
+        )
+    worker_count = direct_media_worker_count(candidate)
+    part_size = direct_media_part_size_for_candidate(total, candidate, worker_count)
+    if candidate_looks_chzzk(candidate, candidate.get("source") or ""):
+        emit_event(
+            on_event,
+            "log",
+            message=(
+                f"CHZZK route=direct workers={worker_count} "
+                f"part_size={display_size(part_size)} total={display_size(total)} url_ext=mp4"
+            ),
+        )
     use_parallel = should_use_parallel_direct_download(url, headers, total)
     emit_event(on_event, "status", message="Starting parallel direct download" if use_parallel else "Starting direct download")
     if use_parallel:
@@ -4647,7 +4716,8 @@ def download_direct_media(url, candidate, output_dir, on_event=None):
                 headers,
                 total,
                 on_event=on_event,
-                part_size=direct_media_parallel_part_size(total),
+                part_size=part_size,
+                workers=worker_count,
             )
         except DirectMediaRangeUnsupported:
             emit_event(on_event, "status", message="Range download unsupported; retrying direct download")

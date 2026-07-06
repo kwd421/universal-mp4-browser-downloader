@@ -253,6 +253,98 @@ class CandidatePresenterTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["candidate"]["id"], "hls-1080")
 
+    def test_filter_manifest_duplicates_keeps_chzzk_hls_with_sized_direct(self):
+        candidates = [
+            {
+                "id": "chzzk-direct",
+                "source": "https://chzzk.naver.com/video/14056968",
+                "format_id": "chzzk-mp4-1080",
+                "output_ext": "mp4",
+                "height": 1080,
+                "sort_bytes": 40_000_000_000,
+                "is_manifest": False,
+                "url": "https://cdn.example.test/vod.mp4",
+            },
+            {
+                "id": "chzzk-hls",
+                "source": "https://chzzk.naver.com/video/14056968",
+                "format_id": "chzzk-hls-1080",
+                "output_ext": "mp4",
+                "height": 1080,
+                "sort_bytes": 36_000_000_000,
+                "is_manifest": True,
+                "url": "https://cdn.example.test/vod.m3u8",
+            },
+        ]
+
+        filtered = presenter.filter_manifest_duplicates(candidates)
+
+        self.assertEqual([candidate["id"] for candidate in filtered], ["chzzk-direct", "chzzk-hls"])
+
+    def test_group_candidates_keeps_chzzk_direct_and_hls_at_same_resolution(self):
+        candidates = [
+            {
+                "id": "chzzk-direct",
+                "source": "https://chzzk.naver.com/video/14056968",
+                "title": "VOD",
+                "display_title": "VOD",
+                "thumbnail": "t",
+                "format_id": "chzzk-mp4-1080",
+                "output_ext": "mp4",
+                "resolution": "1080p",
+                "height": 1080,
+                "fps": 30,
+                "sort_bytes": 40_000_000_000,
+                "is_manifest": False,
+                "url": "https://cdn.example.test/vod.mp4",
+            },
+            {
+                "id": "chzzk-hls",
+                "source": "https://chzzk.naver.com/video/14056968",
+                "title": "VOD",
+                "display_title": "VOD",
+                "thumbnail": "t",
+                "format_id": "chzzk-hls-1080",
+                "output_ext": "mp4",
+                "resolution": "1920x1080",
+                "height": 1080,
+                "fps": 30,
+                "sort_bytes": 36_000_000_000,
+                "is_manifest": True,
+                "url": "https://cdn.example.test/vod.m3u8",
+            },
+        ]
+
+        rows = presenter.group_candidates(candidates)
+
+        self.assertEqual([candidate["id"] for candidate in rows[0]["qualities"]], ["chzzk-direct", "chzzk-hls"])
+
+    def test_chzzk_quality_label_shows_delivery_kind(self):
+        direct_label = presenter.quality_label(
+            {
+                "format_id": "chzzk-mp4-1080",
+                "source": "https://chzzk.naver.com/video/1",
+                "output_ext": "mp4",
+                "resolution": "1080p",
+                "sort_bytes": 1_000_000,
+                "url": "https://cdn.example.test/vod.mp4",
+            }
+        )
+        hls_label = presenter.quality_label(
+            {
+                "format_id": "chzzk-hls-1080",
+                "source": "https://chzzk.naver.com/video/1",
+                "output_ext": "mp4",
+                "resolution": "1080p",
+                "sort_bytes": 900_000,
+                "is_manifest": True,
+                "url": "https://cdn.example.test/vod.m3u8",
+            }
+        )
+
+        self.assertIn("직접", direct_label)
+        self.assertIn("HLS", hls_label)
+
     def test_group_candidates_dedupes_same_quality_using_downloadability(self):
         candidates = [
             {"id": "direct-1080", "source": "s", "title": "Video", "display_title": "Video", "thumbnail": "t", "output_ext": "mp4", "height": 1080, "fps": 60, "vcodec": "avc1.640028", "acodec": "bestaudio", "sort_bytes": 900_000_000, "is_manifest": False, "protocol": "https", "download_risk": "youtube_tv_https_po_token"},

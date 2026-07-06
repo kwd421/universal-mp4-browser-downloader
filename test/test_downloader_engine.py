@@ -1797,6 +1797,79 @@ for line in sys.stdin:
             engine.DIRECT_MEDIA_PARALLEL_WORKERS,
         )
 
+    def test_chzzk_direct_media_uses_more_workers_and_smaller_chunks(self):
+        candidate = {
+            "format_id": "chzzk-mp4-1080",
+            "source": "https://chzzk.naver.com/video/14056968",
+            "url": "https://cdn.example.test/vod.mp4",
+        }
+        total = 50 * 1024 * 1024 * 1024
+        workers = engine.direct_media_worker_count(candidate)
+        part_size = engine.direct_media_part_size_for_candidate(total, candidate, workers)
+
+        self.assertEqual(workers, engine.CHZZK_DIRECT_MEDIA_WORKERS)
+        self.assertEqual(part_size, engine.CHZZK_DIRECT_MEDIA_PART_SIZE)
+        self.assertGreater(len(list(engine.direct_media_ranges(total, part_size=part_size))), workers)
+
+    def test_download_direct_media_parallel_respects_workers_argument(self):
+        import concurrent.futures
+
+        content = b"x" * 20
+        captured = {}
+        original_urlopen = engine.parallel_http_urlopen
+        original_executor = concurrent.futures.ThreadPoolExecutor
+
+        class CapturingExecutor(original_executor):
+            def __init__(self, max_workers=None, **kwargs):
+                captured["max_workers"] = max_workers
+                super().__init__(max_workers=max_workers, **kwargs)
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+                self.status = 206
+                self.headers = {"Content-Length": str(len(payload))}
+                self.offset = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, size=-1):
+                if size is None or size < 0:
+                    size = len(self.payload) - self.offset
+                chunk = self.payload[self.offset : self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+
+        def fake_urlopen(request, timeout=30):
+            del timeout
+            range_header = request.get_header("Range")
+            start_text, end_text = range_header.removeprefix("bytes=").split("-", 1)
+            start = int(start_text)
+            end = int(end_text)
+            return FakeResponse(content[start : end + 1])
+
+        try:
+            engine.parallel_http_urlopen = fake_urlopen
+            concurrent.futures.ThreadPoolExecutor = CapturingExecutor
+            with tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "Video.mp4"
+                engine.download_direct_media_parallel(
+                    "https://cdn.example.test/video.mp4",
+                    output,
+                    {},
+                    len(content),
+                    part_size=5,
+                    workers=3,
+                )
+            self.assertEqual(captured["max_workers"], 3)
+        finally:
+            engine.parallel_http_urlopen = original_urlopen
+            concurrent.futures.ThreadPoolExecutor = original_executor
+
     def test_small_direct_media_download_uses_parallel_when_range_supported(self):
         content = b"x" * (3 * 1024 * 1024)
         ranges = []
@@ -3566,6 +3639,7 @@ for line in sys.stdin:
         original_threshold = engine.DIRECT_MEDIA_PARALLEL_THRESHOLD
         original_part_size = engine.DIRECT_MEDIA_PARALLEL_PART_SIZE
         original_workers = engine.DIRECT_MEDIA_PARALLEL_WORKERS
+        original_chzzk_workers = engine.CHZZK_DIRECT_MEDIA_WORKERS
 
         class FakeResponse:
             def __init__(self, payload, headers):
@@ -3608,6 +3682,7 @@ for line in sys.stdin:
             engine.DIRECT_MEDIA_PARALLEL_THRESHOLD = 1
             engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = 256 * 1024
             engine.DIRECT_MEDIA_PARALLEL_WORKERS = 2
+            engine.CHZZK_DIRECT_MEDIA_WORKERS = 2
             with tempfile.TemporaryDirectory() as temp:
                 result = engine.download_direct_media(
                     "https://cdn.example.test/video.mp4",
@@ -3617,6 +3692,7 @@ for line in sys.stdin:
                         "ext": "mp4",
                         "sort_bytes": len(content),
                         "source": "https://chzzk.naver.com/video/1",
+                        "format_id": "chzzk-mp4-1080",
                     },
                     temp,
                     on_event=events.append,
@@ -3627,8 +3703,9 @@ for line in sys.stdin:
             engine.DIRECT_MEDIA_PARALLEL_THRESHOLD = original_threshold
             engine.DIRECT_MEDIA_PARALLEL_PART_SIZE = original_part_size
             engine.DIRECT_MEDIA_PARALLEL_WORKERS = original_workers
+            engine.CHZZK_DIRECT_MEDIA_WORKERS = original_chzzk_workers
 
-        self.assertEqual(len(ranges), 2)
+        self.assertGreaterEqual(len(ranges), 2)
         self.assertTrue(all(value.startswith("bytes=") for value in ranges))
         self.assertTrue(any(event.get("type") == "progress" and event.get("speed_text") for event in events))
 
