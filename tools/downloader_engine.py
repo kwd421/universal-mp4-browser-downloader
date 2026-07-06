@@ -5269,6 +5269,15 @@ def hls_playlist_parallel_encryption(playlist_text):
     return "none"
 
 
+def hls_absolute_media_url(playlist_url, media_ref):
+    absolute = urllib.parse.urljoin(str(playlist_url or ""), str(media_ref or "").strip())
+    playlist = urllib.parse.urlparse(str(playlist_url or ""))
+    media = urllib.parse.urlparse(absolute)
+    if playlist.query and not media.query:
+        absolute = urllib.parse.urlunparse(media._replace(query=playlist.query))
+    return absolute
+
+
 def parse_hls_media_playlist(playlist_text, playlist_url):
     media_sequence = 0
     key_url = ""
@@ -5284,11 +5293,11 @@ def parse_hls_media_playlist(playlist_text, playlist_url):
         elif line.startswith("#EXT-X-MAP:"):
             uri_match = re.search(r'URI="([^"]+)"', line)
             if uri_match:
-                init_map_url = urllib.parse.urljoin(playlist_url, uri_match.group(1))
+                init_map_url = hls_absolute_media_url(playlist_url, uri_match.group(1))
         elif line.startswith("#EXT-X-KEY:"):
             uri_match = re.search(r'URI="([^"]+)"', line)
             if uri_match:
-                key_url = urllib.parse.urljoin(playlist_url, uri_match.group(1))
+                key_url = hls_absolute_media_url(playlist_url, uri_match.group(1))
             iv_match = re.search(r"IV=0x([0-9a-fA-F]+)", line)
             if iv_match:
                 key_iv = bytes.fromhex(iv_match.group(1))
@@ -5299,7 +5308,7 @@ def parse_hls_media_playlist(playlist_text, playlist_url):
             except ValueError:
                 pending_duration = None
         elif line and not line.startswith("#"):
-            segment_urls.append(urllib.parse.urljoin(playlist_url, line))
+            segment_urls.append(hls_absolute_media_url(playlist_url, line))
             segment_durations.append(float(pending_duration or 0.0))
             pending_duration = None
     return {
@@ -5517,7 +5526,7 @@ def iter_hls_segment_urls(playlist_text, playlist_url):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        segment_urls.append(urllib.parse.urljoin(playlist_url, line))
+        segment_urls.append(hls_absolute_media_url(playlist_url, line))
     return segment_urls
 
 

@@ -2422,6 +2422,23 @@ for line in sys.stdin:
             )
         )
 
+    def test_parse_hls_media_playlist_inherits_playlist_query_for_relative_segments(self):
+        playlist = "\n".join(
+            [
+                "#EXTM3U",
+                "#EXTINF:4.0,",
+                "seg-000000.ts",
+            ]
+        )
+        playlist_url = "https://cdn.example.test/vod/stream.m3u8?token=abc123"
+
+        meta = engine.parse_hls_media_playlist(playlist, playlist_url)
+
+        self.assertEqual(
+            meta["segment_urls"][0],
+            "https://cdn.example.test/vod/seg-000000.ts?token=abc123",
+        )
+
     def test_parse_hls_media_playlist_reads_init_map_url(self):
         playlist = '\n'.join(
             [
