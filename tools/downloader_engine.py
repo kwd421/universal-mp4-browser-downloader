@@ -58,10 +58,10 @@ BROWSER_DOM_HTML_CACHE_MAX_AGE = 90.0
 BROWSER_DOM_HTML_CACHE_DOWNLOAD_MAX_AGE = 300.0
 BROWSER_DOM_HLS_PARALLEL_MAX_BYTES = 64 * 1024 * 1024
 BROWSER_DOM_HLS_PARALLEL_MAX_SEGMENTS = 240
-# HLS parallel: workers = concurrent segment fetches; max_in_flight caps queued futures
-# and temp files so multi-hour VODs do not retain all segments in RAM.
+# HLS parallel: workers = thread pool size; max_in_flight = queued segment downloads.
+# in_flight > workers keeps the pipeline full while segments finish out of order.
 HLS_PARALLEL_WORKERS = 56
-HLS_PARALLEL_MAX_IN_FLIGHT = 56
+HLS_PARALLEL_MAX_IN_FLIGHT = 80
 HLS_SEGMENT_READ_CHUNK = 1024 * 1024
 HLS_PARALLEL_PROGRESS_INTERVAL = 0.25
 HLS_SEGMENT_RETRIES = 3
