@@ -3180,17 +3180,63 @@ for line in sys.stdin:
                 engine.chzzk_video_playback = original_playback
             engine.enrich_missing_sizes = original_enrich
 
-    def test_chzzk_direct_speed_is_slow_after_warmup(self):
-        total = 80 * 1024 * 1024 * 1024
-        self.assertFalse(engine.chzzk_direct_speed_is_slow(100_000_000, 10.0, total))
-        self.assertTrue(engine.chzzk_direct_speed_is_slow(100_000_000, 30.0, total))
+    def test_chzzk_choose_download_route_picks_hls_when_probe_is_faster(self):
+        direct = {
+            "url": "https://cdn.example.test/vod.mp4",
+            "source": "https://chzzk.naver.com/video/1",
+            "height": 1080,
+        }
+        hls = {
+            "url": "https://cdn.example.test/vod.m3u8",
+            "source": "https://chzzk.naver.com/video/1",
+            "height": 1080,
+            "is_manifest": True,
+        }
+        original_direct_probe = engine.chzzk_probe_direct_speed
+        original_hls_probe = engine.chzzk_probe_hls_speed
 
-    def test_download_chzzk_falls_back_to_hls_when_direct_is_slow(self):
+        try:
+            engine.chzzk_probe_direct_speed = lambda *args, **kwargs: 4 * 1024 * 1024
+            engine.chzzk_probe_hls_speed = lambda *args, **kwargs: 12 * 1024 * 1024
+            route, chosen = engine.chzzk_choose_download_route(direct, hls)
+            self.assertEqual(route, "hls")
+            self.assertEqual(chosen["url"], hls["url"])
+        finally:
+            engine.chzzk_probe_direct_speed = original_direct_probe
+            engine.chzzk_probe_hls_speed = original_hls_probe
+
+    def test_chzzk_choose_download_route_picks_direct_when_probe_is_faster(self):
+        direct = {
+            "url": "https://cdn.example.test/vod.mp4",
+            "source": "https://chzzk.naver.com/video/1",
+            "height": 1080,
+        }
+        hls = {
+            "url": "https://cdn.example.test/vod.m3u8",
+            "source": "https://chzzk.naver.com/video/1",
+            "height": 1080,
+            "is_manifest": True,
+        }
+        original_direct_probe = engine.chzzk_probe_direct_speed
+        original_hls_probe = engine.chzzk_probe_hls_speed
+
+        try:
+            engine.chzzk_probe_direct_speed = lambda *args, **kwargs: 20 * 1024 * 1024
+            engine.chzzk_probe_hls_speed = lambda *args, **kwargs: 8 * 1024 * 1024
+            route, chosen = engine.chzzk_choose_download_route(direct, hls)
+            self.assertEqual(route, "direct")
+            self.assertEqual(chosen["url"], direct["url"])
+        finally:
+            engine.chzzk_probe_direct_speed = original_direct_probe
+            engine.chzzk_probe_hls_speed = original_hls_probe
+
+    def test_download_chzzk_starts_hls_when_probe_selects_hls(self):
         events = []
         hls_urls = []
-        original_direct = engine.download_direct_media
+        original_choose = engine.chzzk_choose_download_route
+        original_pair = engine.chzzk_paired_route_candidates
         original_hls = engine.download_hls_parallel
-        original_alt = engine.chzzk_alternative_hls_candidate
+        original_direct = engine.download_direct_media
         original_total = engine.resolve_direct_media_total
 
         candidate = {
@@ -3202,15 +3248,19 @@ for line in sys.stdin:
             "ext": "mp4",
             "height": 1080,
         }
+        hls_candidate = {
+            **candidate,
+            "url": "https://cdn.example.test/vod.m3u8",
+            "is_manifest": True,
+        }
 
-        def fake_direct(url, cand, output_dir, on_event=None, slow_check=None):
-            del url, cand, output_dir, on_event
-            if slow_check:
-                slow_check(100_000_000, 30.0)
-
-        def fake_alt(cand, page_url, cookie_source, on_event=None):
+        def fake_pair(cand, page_url, cookie_source, on_event=None):
             del page_url, cookie_source, on_event
-            return {**cand, "url": "https://cdn.example.test/vod.m3u8", "is_manifest": True}
+            return cand, hls_candidate
+
+        def fake_choose(direct_candidate, hls_cand, on_event=None):
+            del on_event
+            return "hls", hls_cand
 
         def fake_hls(url, cand, output_dir, on_event=None):
             del cand, on_event
@@ -3224,14 +3274,18 @@ for line in sys.stdin:
                 "target_url": url,
             }
 
+        def fake_direct(*args, **kwargs):
+            raise AssertionError("direct download should not start when probe selects HLS")
+
         def fake_total(url, headers, cand):
             del url, headers, cand
             return 80 * 1024 * 1024 * 1024
 
         try:
-            engine.download_direct_media = fake_direct
-            engine.chzzk_alternative_hls_candidate = fake_alt
+            engine.chzzk_paired_route_candidates = fake_pair
+            engine.chzzk_choose_download_route = fake_choose
             engine.download_hls_parallel = fake_hls
+            engine.download_direct_media = fake_direct
             engine.resolve_direct_media_total = fake_total
             with tempfile.TemporaryDirectory() as temp:
                 result = engine.download_chzzk_candidate(
@@ -3242,17 +3296,11 @@ for line in sys.stdin:
                 )
             self.assertEqual(hls_urls, ["https://cdn.example.test/vod.m3u8"])
             self.assertTrue(result["output_path"].endswith("VOD.mp4"))
-            self.assertTrue(
-                any(
-                    "switching to HLS" in str(event.get("message") or "")
-                    for event in events
-                    if event.get("type") == "log"
-                )
-            )
         finally:
-            engine.download_direct_media = original_direct
+            engine.chzzk_choose_download_route = original_choose
+            engine.chzzk_paired_route_candidates = original_pair
             engine.download_hls_parallel = original_hls
-            engine.chzzk_alternative_hls_candidate = original_alt
+            engine.download_direct_media = original_direct
             engine.resolve_direct_media_total = original_total
 
     def test_download_candidate_uses_direct_http_for_chzzk_mp4_candidates(self):

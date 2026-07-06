@@ -76,9 +76,10 @@ HLS_PARALLEL_MAX_IN_FLIGHT = _env_int(
 )
 CHZZK_DIRECT_MEDIA_WORKERS = _env_int("CLIPFLOW_CHZZK_DIRECT_WORKERS", 8, 1, 16)
 CHZZK_DIRECT_MEDIA_PART_SIZE = _env_int("CLIPFLOW_CHZZK_DIRECT_PART_MB", 128, 1, 1024) * 1024 * 1024
-CHZZK_DIRECT_SLOW_FALLBACK_SECONDS = float(_env_int("CLIPFLOW_CHZZK_SLOW_FALLBACK_SEC", 25, 5, 120))
-CHZZK_DIRECT_SLOW_FALLBACK_MIN_BYTES = 64 * 1024 * 1024
-CHZZK_DIRECT_SLOW_FALLBACK_BYTES_PER_SEC = _env_int("CLIPFLOW_CHZZK_SLOW_FALLBACK_MBPS", 6, 1, 50) * 1024 * 1024
+CHZZK_AUTO_ROUTE_MIN_BYTES = 64 * 1024 * 1024
+CHZZK_ROUTE_PROBE_BYTES = _env_int("CLIPFLOW_CHZZK_PROBE_MB", 4, 1, 32) * 1024 * 1024
+CHZZK_ROUTE_PROBE_HLS_SEGMENTS = _env_int("CLIPFLOW_CHZZK_PROBE_HLS_SEGMENTS", 3, 1, 8)
+CHZZK_ROUTE_PROBE_TIMEOUT = _env_int("CLIPFLOW_CHZZK_PROBE_TIMEOUT_SEC", 12, 3, 30)
 HLS_SEGMENT_READ_CHUNK = 1024 * 1024
 HLS_PARALLEL_PROGRESS_INTERVAL = 0.25
 HLS_SEGMENT_RETRIES = 3
@@ -4154,33 +4155,82 @@ def merge_chzzk_analysis_candidate(base, fresh):
     return merged
 
 
-def chzzk_direct_slow_fallback_enabled(candidate, total):
+def chzzk_auto_route_enabled(candidate, total):
     if not candidate_looks_chzzk(candidate, candidate.get("source") or ""):
         return False
     if clip_range_from_candidate(candidate):
         return False
-    return safe_int(total) >= CHZZK_DIRECT_SLOW_FALLBACK_MIN_BYTES
+    return safe_int(total) >= CHZZK_AUTO_ROUTE_MIN_BYTES
 
 
-def chzzk_direct_speed_is_slow(downloaded, elapsed, total):
-    if safe_int(total) < CHZZK_DIRECT_SLOW_FALLBACK_MIN_BYTES:
-        return False
-    if float(elapsed) < CHZZK_DIRECT_SLOW_FALLBACK_SECONDS:
-        return False
-    if safe_int(downloaded) <= 0:
-        return True
-    return (safe_int(downloaded) / float(elapsed)) < CHZZK_DIRECT_SLOW_FALLBACK_BYTES_PER_SEC
+def chzzk_probe_direct_speed(url, headers, probe_bytes=None, offset=0):
+    probe_bytes = max(1, safe_int(probe_bytes or CHZZK_ROUTE_PROBE_BYTES))
+    offset = max(0, safe_int(offset))
+    range_headers = {**dict(headers or {}), "Range": f"bytes={offset}-{offset + probe_bytes - 1}"}
+    request = urllib.request.Request(str(url or ""), headers=range_headers)
+    started = time.monotonic()
+    try:
+        with parallel_http_urlopen(request, timeout=CHZZK_ROUTE_PROBE_TIMEOUT) as response:
+            if safe_int(getattr(response, "status", 206)) not in {200, 206}:
+                return 0.0
+            data = response.read()
+    except (OSError, urllib.error.URLError, RuntimeError, ValueError):
+        return 0.0
+    elapsed = time.monotonic() - started
+    if not data or elapsed <= 0:
+        return 0.0
+    return len(data) / elapsed
 
 
-def chzzk_direct_slow_check(total):
-    def check(downloaded, elapsed):
-        if chzzk_direct_speed_is_slow(downloaded, elapsed, total):
-            speed = safe_int(downloaded) / max(0.001, float(elapsed))
-            raise ChzzkDirectSlowFallback(
-                f"CHZZK direct {display_size(speed)}/s below "
-                f"{display_size(CHZZK_DIRECT_SLOW_FALLBACK_BYTES_PER_SEC)}/s after {int(elapsed)}s"
-            )
-    return check
+def chzzk_probe_hls_speed(url, headers, segment_count=None):
+    segment_count = max(1, safe_int(segment_count or CHZZK_ROUTE_PROBE_HLS_SEGMENTS))
+    try:
+        playlist_url, playlist_text = resolve_hls_media_playlist(url, headers)
+        playlist_meta = parse_hls_media_playlist(playlist_text, playlist_url)
+        segment_urls = list(playlist_meta.get("segment_urls") or [])[:segment_count]
+        if not segment_urls:
+            return 0.0
+        started = time.monotonic()
+        downloaded = 0
+        for segment_url in segment_urls:
+            request = urllib.request.Request(segment_url, headers=dict(headers or {}))
+            with parallel_http_urlopen(request, timeout=CHZZK_ROUTE_PROBE_TIMEOUT) as response:
+                while True:
+                    chunk = response.read(HLS_SEGMENT_READ_CHUNK)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+        elapsed = time.monotonic() - started
+        if downloaded <= 0 or elapsed <= 0:
+            return 0.0
+        return downloaded / elapsed
+    except (OSError, urllib.error.URLError, RuntimeError, ValueError):
+        return 0.0
+
+
+def chzzk_alternative_direct_candidate(candidate, page_url, cookie_source, on_event=None):
+    hint = chzzk_source_hint(
+        candidate.get("source"),
+        candidate.get("webpage_url"),
+        candidate.get("source_url"),
+        page_url,
+    )
+    if not hint:
+        return None
+    analysis = analyze_chzzk_clip(hint, on_event=on_event, cookie_source=cookie_source)
+    if not analysis:
+        analysis = analyze_chzzk_video(hint, on_event=on_event, cookie_source=cookie_source)
+    if not analysis:
+        return None
+    target_height = safe_int(candidate.get("height"))
+    picks = analysis.get("candidates") or []
+    for item in picks:
+        if is_chzzk_direct_mp4_candidate(item, hint) and safe_int(item.get("height")) == target_height:
+            return merge_chzzk_analysis_candidate(candidate, item)
+    for item in picks:
+        if is_chzzk_direct_mp4_candidate(item, hint):
+            return merge_chzzk_analysis_candidate(candidate, item)
+    return None
 
 
 def chzzk_alternative_hls_candidate(candidate, page_url, cookie_source, on_event=None):
@@ -4206,6 +4256,73 @@ def chzzk_alternative_hls_candidate(candidate, page_url, cookie_source, on_event
         if is_chzzk_hls_candidate(item, hint):
             return merge_chzzk_analysis_candidate(candidate, item)
     return None
+
+
+def chzzk_paired_route_candidates(candidate, page_url, cookie_source, on_event=None):
+    candidate = dict(candidate or {})
+    hint = page_url
+    direct_candidate = candidate if is_chzzk_direct_mp4_candidate(candidate, hint) else None
+    hls_candidate = candidate if is_chzzk_hls_candidate(candidate, hint) else None
+    if not direct_candidate:
+        direct_candidate = chzzk_alternative_direct_candidate(candidate, page_url, cookie_source, on_event=on_event)
+    if not hls_candidate:
+        hls_candidate = chzzk_alternative_hls_candidate(candidate, page_url, cookie_source, on_event=on_event)
+    return direct_candidate, hls_candidate
+
+
+def chzzk_choose_download_route(direct_candidate, hls_candidate, on_event=None):
+    direct_candidate = dict(direct_candidate or {})
+    hls_candidate = dict(hls_candidate or {})
+    direct_url = str(direct_candidate.get("url") or "")
+    hls_url = str(hls_candidate.get("url") or "")
+    if not direct_url:
+        return "hls", hls_candidate
+    if not hls_url:
+        return "direct", direct_candidate
+
+    emit_event(on_event, "status", message="CHZZK direct/HLS 속도 비교 중")
+    direct_headers = direct_media_request_headers(direct_candidate)
+    hls_headers = direct_media_request_headers(hls_candidate)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        direct_future = executor.submit(chzzk_probe_direct_speed, direct_url, direct_headers)
+        hls_future = executor.submit(chzzk_probe_hls_speed, hls_url, hls_headers)
+        direct_speed = float(direct_future.result() or 0.0)
+        hls_speed = float(hls_future.result() or 0.0)
+
+    emit_event(
+        on_event,
+        "log",
+        message=(
+            f"CHZZK route probe: direct={display_size(direct_speed)}/s "
+            f"hls={display_size(hls_speed)}/s"
+        ),
+    )
+    if direct_speed <= 0 and hls_speed <= 0:
+        emit_event(on_event, "log", message="CHZZK route probe inconclusive; defaulting to direct")
+        return "direct", direct_candidate
+    if hls_speed <= 0:
+        return "direct", direct_candidate
+    if direct_speed <= 0:
+        return "hls", hls_candidate
+    if hls_speed > direct_speed:
+        emit_event(
+            on_event,
+            "log",
+            message=(
+                f"CHZZK auto-route: selected hls "
+                f"({display_size(hls_speed)}/s > {display_size(direct_speed)}/s)"
+            ),
+        )
+        return "hls", hls_candidate
+    emit_event(
+        on_event,
+        "log",
+        message=(
+            f"CHZZK auto-route: selected direct "
+            f"({display_size(direct_speed)}/s >= {display_size(hls_speed)}/s)"
+        ),
+    )
+    return "direct", direct_candidate
 
 
 def refresh_chzzk_candidate_media(candidate, page_url, cookie_source, on_event=None):
@@ -4265,28 +4382,53 @@ def download_chzzk_candidate(page_url, candidate, output_dir, cookie_source="없
     media_url = str(candidate.get("url") or "").strip()
     if media_url:
         target_url = media_url
-    if is_chzzk_direct_mp4_candidate(candidate, page_url):
-        if clip_range_from_candidate(candidate):
+    if clip_range_from_candidate(candidate):
+        if is_chzzk_direct_mp4_candidate(candidate, page_url):
             return download_direct_media_segment(target_url, candidate, output_dir, on_event=on_event)
-        headers = direct_media_request_headers(candidate)
-        total = resolve_direct_media_total(target_url, headers, candidate)
-        slow_check = chzzk_direct_slow_check(total) if chzzk_direct_slow_fallback_enabled(candidate, total) else None
-        try:
-            return download_direct_media(
-                target_url,
-                candidate,
-                output_dir,
-                on_event=on_event,
-                slow_check=slow_check,
-            )
-        except ChzzkDirectSlowFallback as exc:
-            hls_candidate = chzzk_alternative_hls_candidate(candidate, page_url, cookie_source, on_event=on_event)
-            if not hls_candidate:
-                raise RuntimeError(
-                    "CHZZK direct download was too slow and no HLS fallback was found."
-                ) from exc
-            emit_event(on_event, "log", message=f"CHZZK auto-route: {exc}; switching to HLS")
+        emit_event(
+            on_event,
+            "log",
+            message=(
+                f"CHZZK route=hls workers={HLS_PARALLEL_WORKERS} "
+                f"max_in_flight={HLS_PARALLEL_MAX_IN_FLIGHT} url_ext=hls"
+            ),
+        )
+        return download_hls_parallel(target_url, candidate, output_dir, on_event=on_event)
+
+    headers = direct_media_request_headers(candidate)
+    total = resolve_direct_media_total(target_url, headers, candidate) if is_chzzk_direct_mp4_candidate(candidate, page_url) else 0
+    if not total:
+        total = candidate_expected_size(candidate)
+    if chzzk_auto_route_enabled(candidate, total):
+        direct_candidate, hls_candidate = chzzk_paired_route_candidates(
+            candidate,
+            page_url,
+            cookie_source,
+            on_event=on_event,
+        )
+        if direct_candidate:
+            direct_candidate = candidate_with_request_cookies(direct_candidate, cookie_source)
+        if hls_candidate:
             hls_candidate = candidate_with_request_cookies(hls_candidate, cookie_source)
+        if direct_candidate and hls_candidate:
+            route, chosen = chzzk_choose_download_route(direct_candidate, hls_candidate, on_event=on_event)
+            if route == "hls":
+                hls_url = str(chosen.get("url") or "").strip() or target_url
+                emit_event(
+                    on_event,
+                    "log",
+                    message=(
+                        f"CHZZK route=hls workers={HLS_PARALLEL_WORKERS} "
+                        f"max_in_flight={HLS_PARALLEL_MAX_IN_FLIGHT} url_ext=hls"
+                    ),
+                )
+                return download_hls_parallel(hls_url, chosen, output_dir, on_event=on_event)
+            direct_url = str(chosen.get("url") or "").strip() or target_url
+            return download_direct_media(direct_url, chosen, output_dir, on_event=on_event)
+        if direct_candidate:
+            direct_url = str(direct_candidate.get("url") or "").strip() or target_url
+            return download_direct_media(direct_url, direct_candidate, output_dir, on_event=on_event)
+        if hls_candidate:
             hls_url = str(hls_candidate.get("url") or "").strip() or target_url
             emit_event(
                 on_event,
@@ -4297,6 +4439,9 @@ def download_chzzk_candidate(page_url, candidate, output_dir, cookie_source="없
                 ),
             )
             return download_hls_parallel(hls_url, hls_candidate, output_dir, on_event=on_event)
+
+    if is_chzzk_direct_mp4_candidate(candidate, page_url):
+        return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
     emit_event(
         on_event,
         "log",
