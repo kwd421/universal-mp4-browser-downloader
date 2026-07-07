@@ -1116,6 +1116,93 @@ def run_ffmpeg_command(command, timeout=900, error_label="ffmpeg failed"):
     return stdout, stderr
 
 
+def run_ffmpeg_command_with_output_progress(
+    command,
+    progress_path,
+    total_bytes,
+    on_event=None,
+    timeout=900,
+    error_label="ffmpeg failed",
+):
+    progress_path = Path(progress_path).expanduser()
+    total_bytes = safe_int(total_bytes)
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **_hidden_subprocess_kwargs(),
+    )
+    stdout_chunks = []
+    stderr_chunks = []
+
+    def read_stream(stream, chunks):
+        try:
+            while True:
+                data = stream.read(8192)
+                if not data:
+                    break
+                chunks.append(data)
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    stdout_reader = threading.Thread(target=read_stream, args=(process.stdout, stdout_chunks), daemon=True)
+    stderr_reader = threading.Thread(target=read_stream, args=(process.stderr, stderr_chunks), daemon=True)
+    stdout_reader.start()
+    stderr_reader.start()
+
+    started_at = time.monotonic()
+    last_emit_at = started_at
+    last_emit_size = 0
+    try:
+        while process.poll() is None:
+            now = time.monotonic()
+            if now - started_at > timeout:
+                terminate_process_tree(process)
+                raise RuntimeError(f"{error_label}: timed out after {int(timeout)}s")
+            if now - last_emit_at >= 0.5:
+                try:
+                    current_size = progress_path.stat().st_size
+                except OSError:
+                    current_size = 0
+                speed_bps = 0.0
+                if current_size > last_emit_size:
+                    speed_bps = (current_size - last_emit_size) / max(0.001, now - last_emit_at)
+                eta_text = ""
+                if total_bytes > 0 and speed_bps > 0 and current_size < total_bytes:
+                    eta = max(0, int((total_bytes - current_size) / speed_bps))
+                    eta_text = display_duration(eta) if eta > 0 else ""
+                emit_event(
+                    on_event,
+                    "progress",
+                    percent=100,
+                    phase="finishing",
+                    message="마무리 중",
+                    eta_text=eta_text,
+                    speed=speed_bps,
+                    speed_text=f"{display_size(speed_bps)}/s" if speed_bps > 0 else "",
+                    downloaded=current_size,
+                    total=total_bytes,
+                )
+                last_emit_at = now
+                last_emit_size = current_size
+            time.sleep(0.1)
+    finally:
+        stdout_reader.join(timeout=1)
+        stderr_reader.join(timeout=1)
+
+    stdout = b"".join(stdout_chunks)
+    stderr = b"".join(stderr_chunks)
+    if process.returncode != 0:
+        message = (stderr or stdout or error_label).strip()
+        if isinstance(message, bytes):
+            message = message.decode("utf-8", errors="replace")
+        raise RuntimeError(str(message))
+    return stdout, stderr
+
+
 def convert_existing_media_to_audio(input_path, output_ext, output_dir=None, on_event=None, ffmpeg_exe=None, runner=None):
     input_path = Path(input_path).expanduser()
     if not input_path.is_file():
@@ -4756,33 +4843,45 @@ def download_direct_media_single(url, output_path, headers, total=0, on_event=No
     downloaded = existing_size if append else 0
     started_at = time.monotonic()
     last_progress = {"time": 0.0, "bytes": 0}
-    with parallel_http_urlopen(request, timeout=30) as response:
-        if append and safe_int(getattr(response, "status", 200)) != 206:
-            append = False
-            downloaded = 0
-        content_length = safe_int(response.headers.get("Content-Length"))
-        total = total or (existing_size + content_length if append and content_length else content_length)
-        with part_path.open("ab" if append else "wb") as file:
-            if downloaded and total:
-                emit_direct_download_progress(on_event, downloaded, total, started_at)
-            while True:
-                chunk = response.read(1024 * 256)
-                if not chunk:
-                    break
-                file.write(chunk)
-                downloaded += len(chunk)
-                now = time.monotonic()
-                if total and (now - last_progress["time"] >= 0.25 or downloaded >= total):
-                    emit_direct_download_progress(
-                        on_event,
-                        downloaded,
-                        total,
-                        started_at,
-                        last_bytes=last_progress["bytes"],
-                        last_emit_at=last_progress["time"] or None,
-                    )
-                    last_progress["time"] = now
-                    last_progress["bytes"] = downloaded
+    try:
+        with parallel_http_urlopen(request, timeout=30) as response:
+            if append and safe_int(getattr(response, "status", 200)) != 206:
+                append = False
+                downloaded = 0
+            content_length = safe_int(response.headers.get("Content-Length"))
+            total = total or (existing_size + content_length if append and content_length else content_length)
+            with part_path.open("ab" if append else "wb") as file:
+                if downloaded and total:
+                    emit_direct_download_progress(on_event, downloaded, total, started_at)
+                while True:
+                    chunk = response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    file.write(chunk)
+                    downloaded += len(chunk)
+                    now = time.monotonic()
+                    if total and (now - last_progress["time"] >= 0.25 or downloaded >= total):
+                        emit_direct_download_progress(
+                            on_event,
+                            downloaded,
+                            total,
+                            started_at,
+                            last_bytes=last_progress["bytes"],
+                            last_emit_at=last_progress["time"] or None,
+                        )
+                        last_progress["time"] = now
+                        last_progress["bytes"] = downloaded
+    except urllib.error.HTTPError as exc:
+        if exc.code == 416 and append:
+            # Resume offset was past EOF (stale .part, expired URL, changed size).
+            # Drop the partial file and fetch from the start once.
+            try:
+                part_path.unlink()
+            except OSError:
+                pass
+            emit_event(on_event, "log", message="Resume range rejected (416); restarting direct download from 0")
+            return download_direct_media_single(url, output_path, headers, total=total, on_event=on_event)
+        raise
     if total and downloaded != total:
         raise RuntimeError(f"Direct media download incomplete: downloaded {downloaded} bytes, expected {total}.")
     return part_path
@@ -5025,21 +5124,47 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
         range_headers = {**headers, "Range": f"bytes={resume_start}-{end}"}
         request = urllib.request.Request(url, headers=range_headers)
         written = existing_size if mode == "ab" else 0
-        with parallel_http_urlopen(request, timeout=30) as response:
-            if safe_int(getattr(response, "status", 206)) != 206:
-                raise DirectMediaRangeUnsupported("Direct media range request was not honored.")
-            with segment_path.open(mode) as file:
-                if mode == "ab":
-                    report(existing_size)
-                while True:
-                    if abort_event.is_set():
-                        raise ChzzkDirectSlowFallback("CHZZK direct download aborted for HLS fallback")
-                    chunk = response.read(1024 * 512)
-                    if not chunk:
-                        break
-                    file.write(chunk)
-                    written += len(chunk)
-                    report(len(chunk))
+        try:
+            with parallel_http_urlopen(request, timeout=30) as response:
+                if safe_int(getattr(response, "status", 206)) != 206:
+                    raise DirectMediaRangeUnsupported("Direct media range request was not honored.")
+                with segment_path.open(mode) as file:
+                    if mode == "ab":
+                        report(existing_size)
+                    while True:
+                        if abort_event.is_set():
+                            raise ChzzkDirectSlowFallback("CHZZK direct download aborted for HLS fallback")
+                        chunk = response.read(1024 * 512)
+                        if not chunk:
+                            break
+                        file.write(chunk)
+                        written += len(chunk)
+                        report(len(chunk))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416 and mode == "ab":
+                # Stale .part segment: resume offset past EOF. Restart this range from start.
+                try:
+                    segment_path.unlink()
+                except OSError:
+                    pass
+                range_headers = {**headers, "Range": f"bytes={start}-{end}"}
+                request = urllib.request.Request(url, headers=range_headers)
+                written = 0
+                with parallel_http_urlopen(request, timeout=30) as response:
+                    if safe_int(getattr(response, "status", 206)) != 206:
+                        raise DirectMediaRangeUnsupported("Direct media range request was not honored.")
+                    with segment_path.open("wb") as file:
+                        while True:
+                            if abort_event.is_set():
+                                raise ChzzkDirectSlowFallback("CHZZK direct download aborted for HLS fallback")
+                            chunk = response.read(1024 * 512)
+                            if not chunk:
+                                break
+                            file.write(chunk)
+                            written += len(chunk)
+                            report(len(chunk))
+            else:
+                raise
         if written != expected:
             raise RuntimeError(f"Direct media range returned {written} bytes, expected {expected}.")
         return index, segment_path
@@ -5411,7 +5536,14 @@ def trim_downloaded_media_to_clip_range(output_path, trim_params, candidate=None
     command += ["-c", "copy", "-movflags", "+faststart", "-f", output_format, str(trimmed_path)]
     emit_event(on_event, "log", message="Trimming downloaded clip range")
     try:
-        run_ffmpeg_command(command, error_label="ffmpeg clip trim failed")
+        expected_size = candidate_expected_size(candidate) or output_path.stat().st_size
+        run_ffmpeg_command_with_output_progress(
+            command,
+            trimmed_path,
+            expected_size,
+            on_event=on_event,
+            error_label="ffmpeg clip trim failed",
+        )
     except RuntimeError:
         try:
             trimmed_path.unlink()
@@ -5626,7 +5758,7 @@ def remux_fmp4_file_to_mp4(fmp4_path, output_path, ffmpeg_exe, output_format="mp
         raise RuntimeError((completed.stderr or completed.stdout or "fMP4 remux failed.").strip())
 
 
-def remux_ts_file_to_mp4(ts_path, output_path, ffmpeg_exe, output_format="mp4"):
+def remux_ts_file_to_mp4(ts_path, output_path, ffmpeg_exe, output_format="mp4", on_event=None):
     command = [
         str(ffmpeg_exe),
         "-y",
@@ -5641,7 +5773,17 @@ def remux_ts_file_to_mp4(ts_path, output_path, ffmpeg_exe, output_format="mp4"):
         output_format,
         str(output_path),
     ]
-    run_ffmpeg_command(command, error_label="HLS remux failed")
+    try:
+        total_bytes = Path(ts_path).expanduser().stat().st_size
+    except OSError:
+        total_bytes = 0
+    run_ffmpeg_command_with_output_progress(
+        command,
+        output_path,
+        total_bytes,
+        on_event=on_event,
+        error_label="HLS remux failed",
+    )
 
 
 def hls_parallel_aes_key(playlist_text, playlist_meta, headers):
@@ -5721,6 +5863,19 @@ def emit_hls_parallel_progress(
         if now - float(last_emit_at or 0.0) < HLS_PARALLEL_PROGRESS_INTERVAL:
             return last_emit_at, last_emit_bytes
     expected_total = candidate_expected_size(candidate)
+    if total_segments and completed_segments >= total_segments:
+        emit_event(
+            on_event,
+            "progress",
+            percent=100,
+            downloaded=downloaded_bytes,
+            total=expected_total or downloaded_bytes,
+            speed=0,
+            speed_text="",
+            eta_text="",
+            message="100%",
+        )
+        return time.monotonic(), downloaded_bytes
     if duration:
         if completed_segments >= total_segments:
             current_sec = max(0, duration - 1)
@@ -5743,8 +5898,6 @@ def emit_hls_parallel_progress(
         )
     else:
         percent = completed_segments * 100 / total_segments
-        if completed_segments >= total_segments:
-            percent = min(percent, 99)
         now = time.monotonic()
         if last_emit_at is not None and downloaded_bytes > last_emit_bytes:
             speed = max(0.0, (downloaded_bytes - last_emit_bytes) / max(0.001, now - float(last_emit_at)))
@@ -5889,13 +6042,14 @@ def download_hls_parallel(url, candidate, output_dir, on_event=None, ffmpeg_exe=
                             last_emit_at,
                             last_emit_bytes,
                         )
+        emit_event(on_event, "progress", percent=100, phase="finishing", message="마무리 중")
         emit_event(on_event, "log", message="Finalizing HLS output")
         output_format = normalized_output_ext((candidate or {}).get("output_ext")) or "mp4"
         if is_fmp4:
             # CMAF init + fragment concat is already MP4; skip ffmpeg remux for throughput.
             part_media_path.replace(part_path)
         else:
-            remux_ts_file_to_mp4(part_media_path, part_path, ffmpeg_exe, output_format=output_format)
+            remux_ts_file_to_mp4(part_media_path, part_path, ffmpeg_exe, output_format=output_format, on_event=on_event)
     except BaseException:
         cleanup_partial_output_files(output_path, on_event=on_event)
         raise
@@ -6199,9 +6353,12 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
     clip_bytes = candidate_expected_size(candidate)
     last_output_size = 0
     last_output_emit_at = 0.0
+    segment_finishing = False
+    last_finishing_emit_at = 0.0
+    last_finishing_size = 0
 
     def emit_ffmpeg_progress():
-        nonlocal last_progress, last_percent, last_output_size, last_output_emit_at
+        nonlocal last_progress, last_percent, last_output_size, last_output_emit_at, segment_finishing
         raw_time = progress_values.get("out_time_ms") or progress_values.get("out_time_us")
         current = safe_int(raw_time) / 1_000_000 if raw_time is not None else 0
         if duration:
@@ -6211,6 +6368,27 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
         output_size = safe_int(progress_values.get("total_size"))
         if clip_bytes and output_size:
             percent = max(percent, min(99.0, output_size * 100 / clip_bytes))
+        complete_by_time = bool(duration and current >= max(0.0, duration - 0.05))
+        complete_by_size = bool(clip_bytes and output_size >= clip_bytes)
+        if complete_by_time or complete_by_size:
+            if last_percent < 100:
+                emit_event(
+                    on_event,
+                    "progress",
+                    percent=100,
+                    downloaded=output_size,
+                    total=clip_bytes,
+                    speed=0,
+                    speed_text="",
+                    eta_text="",
+                    message="100%",
+                )
+            last_percent = 100
+            segment_finishing = True
+            last_progress = time.monotonic()
+            last_output_size = output_size
+            last_output_emit_at = last_progress
+            return
         if percent <= last_percent and percent < 99:
             return
         percent = min(percent, 99.0)
@@ -6244,6 +6422,39 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
             message=message,
         )
 
+    def emit_segment_finishing(force=False):
+        nonlocal last_finishing_emit_at, last_finishing_size
+        if not segment_finishing:
+            return
+        now = time.monotonic()
+        if not force and now - last_finishing_emit_at < 0.5:
+            return
+        try:
+            output_size = part_path.stat().st_size
+        except OSError:
+            output_size = 0
+        speed_bps = 0.0
+        if last_finishing_emit_at and output_size > last_finishing_size:
+            speed_bps = (output_size - last_finishing_size) / max(0.001, now - last_finishing_emit_at)
+        eta_text = ""
+        if clip_bytes > 0 and speed_bps > 0 and output_size < clip_bytes:
+            eta = max(0, int((clip_bytes - output_size) / speed_bps))
+            eta_text = display_duration(eta) if eta > 0 else ""
+        emit_event(
+            on_event,
+            "progress",
+            percent=100,
+            phase="finishing",
+            message="마무리 중",
+            eta_text=eta_text,
+            speed=speed_bps,
+            speed_text="",
+            downloaded=output_size,
+            total=clip_bytes,
+        )
+        last_finishing_emit_at = now
+        last_finishing_size = output_size
+
     try:
         while True:
             try:
@@ -6253,6 +6464,8 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
                 process_done = poll() is not None if callable(poll) else False
                 if reader_done and (process_done or not callable(poll)):
                     break
+                if segment_finishing and not process_done:
+                    emit_segment_finishing()
                 if timeout >= 0 and time.monotonic() - last_progress >= timeout:
                     kill = getattr(process, "kill", None)
                     if callable(kill):
@@ -6264,6 +6477,8 @@ def download_direct_media_segment(url, candidate, output_dir, on_event=None, ffm
                 poll = getattr(process, "poll", None)
                 if not callable(poll) or poll() is not None:
                     break
+                if segment_finishing:
+                    emit_segment_finishing(force=True)
                 continue
             line = str(line).strip()
             if not line:
