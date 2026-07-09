@@ -76,6 +76,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           $staging = Join-Path $env:RUNNER_TEMP "clipflow-appcast-publish"
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          # Build step dirties docs/appcast-windows.xml on the tag checkout.
+          # Copy signed outputs aside, then force-switch to main.
           Copy-Item docs/appcast-windows.xml $staging/
           Copy-Item "docs/ClipFlow-$env:CLIPFLOW_VERSION.md" $staging/
           if (Test-Path docs/.nojekyll) {
@@ -84,7 +86,7 @@ jobs:
             New-Item -ItemType File -Force -Path (Join-Path $staging ".nojekyll") | Out-Null
           }
           git fetch origin main
-          git checkout -B main origin/main
+          git checkout -f -B main origin/main
           Copy-Item (Join-Path $staging "appcast-windows.xml") docs/appcast-windows.xml -Force
           Copy-Item (Join-Path $staging "ClipFlow-$env:CLIPFLOW_VERSION.md") "docs/ClipFlow-$env:CLIPFLOW_VERSION.md" -Force
           Copy-Item (Join-Path $staging ".nojekyll") docs/.nojekyll -Force
