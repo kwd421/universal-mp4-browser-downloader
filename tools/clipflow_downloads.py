@@ -208,20 +208,93 @@ class DownloadMixin:
             widget.refresh()
 
     def _clip_spawn_candidate_from_row(self, row, prepared_candidate):
-        prepared = dict(prepared_candidate or {})
-        base = self._row_clip_download_base_candidate(row)
-        if base and not base.get("clip_range"):
-            rebuilt = dict(base)
-            clip_range = engine.clip_range_from_candidate(prepared)
-            if clip_range:
-                rebuilt["clip_range"] = clip_range
-                cut_mode = prepared.get("clip_cut_mode")
-                if cut_mode:
-                    rebuilt["clip_cut_mode"] = cut_mode
-                prepared = engine.candidate_with_clip_range_metadata(rebuilt)
-        return prepared
+        return self._spawn_download_candidate_from_row(row, prepared_candidate)
+
+    def _download_target_signature(self, candidate, row=None):
+        candidate = candidate or {}
+        clip = self._clip_range_tuple(candidate)
+        media_id = str(
+            candidate.get("id")
+            or candidate.get("format_id")
+            or candidate.get("format_selector")
+            or ""
+        ).strip()
+        ext = str(candidate.get("output_ext") or candidate.get("ext") or "").strip().lower()
+        source = str(
+            candidate.get("source")
+            or candidate.get("webpage_url")
+            or candidate.get("url")
+            or (row or {}).get("source_url")
+            or (row or {}).get("input_url")
+            or ""
+        ).strip()
+        return (source, clip, media_id, ext)
+
+    def _active_download_candidate_for_row(self, row):
+        if not row:
+            return None
+        for item in getattr(self, "active_downloads", []) or []:
+            if item.get("row") is row and isinstance(item.get("candidate"), dict):
+                return item.get("candidate")
+        queued = (row or {}).get("_queued_download_candidate")
+        if isinstance(queued, dict):
+            return queued
+        active = (row or {}).get("active_download_candidate")
+        if isinstance(active, dict):
+            return active
+        return None
+
+    def _row_target_candidate(self, row):
+        active = self._active_download_candidate_for_row(row)
+        if active:
+            return active
+        return (row or {}).get("candidate") or {}
+
+    def _download_targets_match(self, row, prepared_candidate):
+        if not row or not prepared_candidate:
+            return False
+        return self._download_target_signature(self._row_target_candidate(row), row) == self._download_target_signature(
+            prepared_candidate, row
+        )
+
+    def _row_is_queued(self, row):
+        return bool(row) and row in getattr(self, "queued_download_rows", [])
+
+    def _row_is_unclaimed_analysis_row(self, row):
+        if not row:
+            return False
+        if row.get("fixed_candidate"):
+            return False
+        if row.get("output_path"):
+            return False
+        if row.get("download_started_at"):
+            return False
+        if row.get("download_starting"):
+            return False
+        if row.get("active_download_candidate") or row.get("_queued_download_candidate"):
+            return False
+        if hasattr(self, "_row_is_downloading") and self._row_is_downloading(row):
+            return False
+        if self._row_is_queued(row):
+            return False
+        status = row.get("status")
+        if status in {DOWNLOAD_STATUS, WAITING_STATUS, COMPLETED_STATUS, PAUSED_STATUS, ANALYZING_STATUS}:
+            return False
+        # READY (or empty) analysis cards can be claimed by the first download.
+        return status in {None, "", READY_STATUS, ERROR_STATUS}
+
+    def _should_spawn_download_sibling_row(self, row, prepared_candidate):
+        """Spawn a new card unless this is an exact duplicate or an unclaimed analysis row."""
+        if not row or not prepared_candidate:
+            return False
+        if self._download_targets_match(row, prepared_candidate):
+            return False
+        if self._row_is_unclaimed_analysis_row(row):
+            return False
+        return True
 
     def _should_spawn_clip_sibling_row(self, row):
+        # Backward-compatible name: busy/completed rows used to always spawn for a new clip.
         if not row:
             return False
         if row.get("status") == COMPLETED_STATUS:
@@ -232,22 +305,47 @@ class DownloadMixin:
             return True
         return False
 
+    def _spawn_download_candidate_from_row(self, row, prepared_candidate):
+        prepared = dict(prepared_candidate or {})
+        base = self._row_clip_download_base_candidate(row)
+        if not base:
+            return prepared
+        rebuilt = dict(base)
+        clip_range = engine.clip_range_from_candidate(prepared)
+        if clip_range:
+            rebuilt["clip_range"] = clip_range
+            cut_mode = prepared.get("clip_cut_mode")
+            if cut_mode:
+                rebuilt["clip_cut_mode"] = cut_mode
+            return engine.candidate_with_clip_range_metadata(rebuilt)
+        rebuilt.pop("clip_range", None)
+        rebuilt.pop("clip_cut_mode", None)
+        # Prefer request metadata (title/ext/etc.) when spawning a full sibling from a clip card.
+        for key in ("title", "display_title", "output_ext", "ext", "format_selector", "id", "format_id"):
+            if prepared.get(key) not in (None, ""):
+                rebuilt[key] = prepared.get(key)
+        return rebuilt
+
     def _spawn_clip_range_download_row(self, source_row, prepared_candidate):
+        return self._spawn_download_row(source_row, prepared_candidate)
+
+    def _spawn_download_row(self, source_row, prepared_candidate):
         if not source_row or not prepared_candidate:
             return None
         prepared = dict(prepared_candidate)
-        if prepared.get("clip_range") and hasattr(self, "_apply_download_candidate_to_row"):
+        if prepared.get("clip_range"):
             prepared = engine.candidate_with_clip_range_metadata(prepared)
         created_order = self._next_row_sequence()
+        clip_locked = bool(engine.clip_range_from_candidate(prepared))
         new_row = {
-            "id": f"{source_row.get('id') or 'row'}-clip-{created_order}",
+            "id": f"{source_row.get('id') or 'row'}-dl-{created_order}",
             "kind": source_row.get("kind") or "video",
             "candidate": prepared,
             "qualities": [prepared],
             "quality_options": build_quality_options([prepared]),
             "selected_index": 0,
             "selected_format_index": 0,
-            "fixed_candidate": True,
+            "fixed_candidate": clip_locked,
             "analysis_source_url": source_row.get("analysis_source_url") or source_row.get("source_url") or "",
             "source_url": source_row.get("source_url") or prepared.get("source") or prepared.get("url") or "",
             "input_url": source_row.get("input_url") or source_row.get("source_url") or "",
@@ -263,6 +361,8 @@ class DownloadMixin:
             "playlist_child_index": source_row.get("playlist_child_index") or 0,
             "playlist_key": source_row.get("playlist_key") or "",
         }
+        if not clip_locked:
+            new_row["download_base_candidate"] = dict(prepared)
         insert_at = self.rows.index(source_row) + 1
         self.rows.insert(insert_at, new_row)
         if hasattr(self, "_render_rows"):
@@ -292,19 +392,18 @@ class DownloadMixin:
             self._set_row_download_error(row, str(exc))
             return
         requested_clip = self._clip_range_tuple(prepared_candidate)
-        if requested_clip and not self._row_owns_clip_range(row, requested_clip):
-            if self._should_spawn_clip_sibling_row(row):
-                self._restore_row_base_display_if_needed(row)
-                spawn_candidate = self._clip_spawn_candidate_from_row(row, prepared_candidate)
-                sibling = self._spawn_clip_range_download_row(row, spawn_candidate)
-                if sibling:
-                    self.start_download_for_row(sibling)
-                    return
+        if self._should_spawn_download_sibling_row(row, prepared_candidate):
+            self._restore_row_base_display_if_needed(row)
+            spawn_candidate = self._spawn_download_candidate_from_row(row, prepared_candidate)
+            sibling = self._spawn_download_row(row, spawn_candidate)
+            if sibling:
+                self.start_download_for_row(sibling)
+                return
         if requested_clip and self._row_owns_clip_range(row, requested_clip) and hasattr(self, "_apply_download_candidate_to_row"):
             self._apply_download_candidate_to_row(row, prepared_candidate)
         candidate = prepared_candidate
 
-        if self._row_is_downloading(row) or row in self.queued_download_rows:
+        if self._row_is_downloading(row) or self._row_is_queued(row):
             if self._row_is_downloading(row):
                 self._set_status("이미 다운로드 중")
             else:
@@ -312,9 +411,10 @@ class DownloadMixin:
             return
         existing_output = self._existing_output_path_for_row(row, candidate)
         if existing_output:
-            self._mark_existing_output(row, existing_output)
+            self._notify_existing_output(row, existing_output, candidate)
             return
         if len(self.active_downloads) >= self._download_concurrency_limit():
+            row["_queued_download_candidate"] = dict(candidate)
             self.queued_download_rows.append(row)
             widget = row.get("widget")
             if widget:
@@ -326,9 +426,9 @@ class DownloadMixin:
 
         download_func = self._local_segment_download_func_for_row(row, candidate) or self._local_audio_download_func_for_row(row, candidate)
         if download_func:
-            self._begin_download(row, candidate, download_func=download_func)
+            self._begin_download(row, candidate, download_func=download_func, prepared=True)
         else:
-            self._begin_download(row, candidate)
+            self._begin_download(row, candidate, prepared=True)
 
     def _playlist_children_for_parent(self, parent):
         parent_id = parent.get("id")
@@ -423,8 +523,12 @@ class DownloadMixin:
             widget.set_status(status, detail)
             widget.set_progress(progress, progress_text)
 
-    def _begin_download(self, row, candidate=None, download_func=None):
-        candidate = candidate or self.selected_candidate_for_row_ref(row)
+    def _begin_download(self, row, candidate=None, download_func=None, *, prepared=False):
+        # When caller already prepared a target (start_download_for_row / queue), keep it.
+        # Re-reading live UI clip here was overwriting an in-flight full download with a later clip.
+        if candidate is None:
+            candidate = self.selected_candidate_for_row_ref(row)
+            prepared = False
         if not candidate:
             return
         resume_progress = 0
@@ -432,11 +536,13 @@ class DownloadMixin:
         if row.get("status") == PAUSED_STATUS:
             resume_progress = max(0, min(99, engine.safe_int(row.get("progress"))))
             resume_progress_text = row.get("progress_text") or (f"{resume_progress}%" if resume_progress else "")
-        try:
-            download_candidate = self._candidate_for_download(row, candidate) if hasattr(self, "_candidate_for_download") else candidate
-        except ValueError as exc:
-            self._set_row_download_error(row, str(exc))
-            return
+        download_candidate = dict(candidate)
+        if not prepared and hasattr(self, "_candidate_for_download"):
+            try:
+                download_candidate = self._candidate_for_download(row, candidate)
+            except ValueError as exc:
+                self._set_row_download_error(row, str(exc))
+                return
         if download_candidate.get("clip_range") and hasattr(self, "_apply_download_candidate_to_row"):
             self._apply_download_candidate_to_row(row, download_candidate)
         download_candidate["_clipflow_row_id"] = str(row.get("id") or "")
@@ -451,6 +557,8 @@ class DownloadMixin:
         row.pop("child_loading", None)
         row["download_starting"] = True
         row.pop("download_finishing", None)
+        row.pop("_queued_download_candidate", None)
+        row["active_download_candidate"] = dict(download_candidate)
         widget = row.get("widget")
         if widget:
             widget.set_status("다운로드 중")
@@ -466,11 +574,13 @@ class DownloadMixin:
             str(row.get("id") or ""),
             page_url,
             download_candidate,
-            self._output_dir_for_row(row, candidate),
+            self._output_dir_for_row(row, download_candidate),
             cookie_source_from_display(self.cookie_combo.currentText()),
             download_func or self.download_func,
         )
-        self.active_downloads.append({"thread": thread, "worker": worker, "row": row})
+        self.active_downloads.append(
+            {"thread": thread, "worker": worker, "row": row, "candidate": dict(download_candidate)}
+        )
         self._sync_legacy_download_refs()
         self._refresh_primary_action()
         self._refresh_footer()
@@ -559,6 +669,8 @@ class DownloadMixin:
         self._cleanup_row_partial_files(row)
         row["download_starting"] = False
         row.pop("download_finishing", None)
+        row.pop("active_download_candidate", None)
+        row.pop("_queued_download_candidate", None)
         row["status"] = PAUSED_STATUS
         row["status_detail"] = ""
         row["progress_text"] = row.get("progress_text") or ""
@@ -575,6 +687,8 @@ class DownloadMixin:
             self._cleanup_row_partial_files(row)
             row["download_starting"] = False
             row.pop("download_finishing", None)
+            row.pop("active_download_candidate", None)
+            row.pop("_queued_download_candidate", None)
             row["status"] = ERROR_STATUS
             row["status_detail"] = message
             row["progress"] = 0
@@ -645,6 +759,90 @@ class DownloadMixin:
         if existing:
             return existing
         return None
+
+    def _normalize_output_path(self, path):
+        if not path:
+            return None
+        try:
+            return Path(path).expanduser().resolve()
+        except OSError:
+            return Path(path).expanduser()
+
+    def _find_row_for_existing_output(self, output_path, candidate, exclude_row=None):
+        """Prefer an existing completed/busy card for this file/target over a fresh analysis card."""
+        target_path = self._normalize_output_path(output_path)
+        target_sig = self._download_target_signature(candidate)
+        path_match = None
+        target_match = None
+        for row in self.rows:
+            if row is exclude_row:
+                continue
+            if hasattr(self, "_is_analysis_loading_row") and self._is_analysis_loading_row(row):
+                continue
+            if row.get("kind") == "playlist" and not row.get("is_playlist_child"):
+                continue
+            row_path = self._normalize_output_path(row.get("output_path") or "")
+            if target_path and row_path and row_path == target_path:
+                path_match = path_match or row
+                if row.get("status") == COMPLETED_STATUS:
+                    return row
+            row_sig = self._download_target_signature(self._row_target_candidate(row), row)
+            if row_sig == target_sig:
+                if self._row_is_downloading(row) or self._row_is_queued(row):
+                    return row
+                if row.get("status") == COMPLETED_STATUS:
+                    target_match = target_match or row
+        return path_match or target_match
+
+    def _row_is_ephemeral_duplicate_notice_row(self, row):
+        """Fresh analysis/ready card that should not stay after redirecting an existing-file notice."""
+        if not row:
+            return False
+        if self._row_is_downloading(row) or self._row_is_queued(row):
+            return False
+        if row.get("download_starting") or row.get("active_download_candidate"):
+            return False
+        if row.get("status") in {DOWNLOAD_STATUS, WAITING_STATUS, PAUSED_STATUS, ANALYZING_STATUS}:
+            return False
+        if row.get("status") == COMPLETED_STATUS and row.get("output_path") and row.get("status_detail") != "이미 있는 파일":
+            return False
+        if row.get("fixed_candidate") and row.get("status") == COMPLETED_STATUS and row.get("output_path"):
+            return False
+        return True
+
+    def _discard_ephemeral_row(self, row):
+        if not row or row not in self.rows:
+            return
+        if row in getattr(self, "queued_download_rows", []):
+            self.queued_download_rows = [item for item in self.queued_download_rows if item is not row]
+        try:
+            index = self.rows.index(row)
+        except ValueError:
+            return
+        self.rows.pop(index)
+        if getattr(self, "selected_row_index", -1) == index:
+            self.selected_row_index = -1
+        elif getattr(self, "selected_row_index", -1) > index:
+            self.selected_row_index -= 1
+        if hasattr(self, "_render_rows"):
+            self._render_rows()
+        if hasattr(self, "_refresh_row_selection"):
+            self._refresh_row_selection()
+        if hasattr(self, "_refresh_primary_action"):
+            self._refresh_primary_action()
+
+    def _notify_existing_output(self, row, output_path, candidate=None):
+        """Show existing-file notice on the best matching card; drop a fresh duplicate card if needed."""
+        prepared = candidate or (row or {}).get("candidate") or {}
+        owner = self._find_row_for_existing_output(output_path, prepared, exclude_row=row)
+        if owner is None:
+            owner = row
+        if owner is not None and owner is not row and row is not None and self._row_is_ephemeral_duplicate_notice_row(row):
+            self._discard_ephemeral_row(row)
+        if owner is None:
+            return None
+        self._mark_existing_output(owner, output_path)
+        return owner
 
     def _output_dir_for_row(self, row, candidate):
         if row and row.get("is_playlist_child"):
@@ -770,6 +968,8 @@ class DownloadMixin:
                 return
             row["download_starting"] = False
             row.pop("download_finishing", None)
+            row.pop("active_download_candidate", None)
+            row.pop("_queued_download_candidate", None)
             clip_locked = bool(engine.clip_range_from_candidate(row.get("candidate") or {}))
             if clip_locked:
                 row["fixed_candidate"] = True
@@ -894,16 +1094,30 @@ class DownloadMixin:
         while self.queued_download_rows and len(self.active_downloads) < self._download_concurrency_limit():
             row = self.queued_download_rows.pop(0)
             if row not in self.rows or self._row_is_downloading(row):
+                row.pop("_queued_download_candidate", None)
                 continue
-            candidate = self.selected_candidate_for_row_ref(row)
+            queued_candidate = row.pop("_queued_download_candidate", None)
+            if isinstance(queued_candidate, dict) and queued_candidate:
+                candidate = dict(queued_candidate)
+                prepared = True
+            else:
+                candidate = self.selected_candidate_for_row_ref(row)
+                prepared = False
+                if candidate and hasattr(self, "_candidate_for_download"):
+                    try:
+                        candidate = self._candidate_for_download(row, candidate)
+                        prepared = True
+                    except ValueError as exc:
+                        self._set_row_download_error(row, str(exc))
+                        continue
             if not candidate:
                 continue
             existing_output = self._existing_output_path_for_row(row, candidate)
             if existing_output:
-                self._mark_existing_output(row, existing_output)
+                self._notify_existing_output(row, existing_output, candidate)
                 continue
             download_func = self._local_segment_download_func_for_row(row, candidate) or self._local_audio_download_func_for_row(row, candidate)
             if download_func:
-                self._begin_download(row, candidate, download_func=download_func)
+                self._begin_download(row, candidate, download_func=download_func, prepared=prepared)
             else:
-                self._begin_download(row, candidate)
+                self._begin_download(row, candidate, prepared=prepared)

@@ -830,16 +830,23 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         return value if isinstance(value, dict) else None
 
     def _candidate_for_download(self, row, candidate):
+        frozen_active = bool(row and row.pop("_frozen_download_clip_active", False))
+        frozen_clip = row.pop("_frozen_download_clip_range", None) if row is not None and frozen_active else None
+        frozen_cut = row.pop("_frozen_download_clip_cut_mode", None) if row is not None and frozen_active else None
         row_clip = engine.clip_range_from_candidate((row or {}).get("candidate") or {}) if row and row.get("fixed_candidate") else None
         try:
             ui_clip = self.current_clip_range()
         except ValueError:
             ui_clip = None
-        normalized_ui_clip = engine.clip_range_from_candidate({"clip_range": ui_clip}) if ui_clip else None
+        if frozen_active:
+            effective_ui_clip = frozen_clip
+        else:
+            effective_ui_clip = ui_clip
+        normalized_ui_clip = engine.clip_range_from_candidate({"clip_range": effective_ui_clip}) if effective_ui_clip else None
         clip_override = bool(normalized_ui_clip and normalized_ui_clip != row_clip)
-        if row and row.get("fixed_candidate") and not clip_override:
+        if row and row.get("fixed_candidate") and not clip_override and not frozen_active:
             prepared = dict(row.get("candidate") or {})
-        elif row and (row.get("download_base_candidate") or (row.get("fixed_candidate") and clip_override)):
+        elif row and (row.get("download_base_candidate") or (row.get("fixed_candidate") and (clip_override or frozen_active))):
             if hasattr(self, "_row_clip_download_base_candidate"):
                 prepared = dict(self._row_clip_download_base_candidate(row) or {})
             else:
@@ -853,13 +860,18 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if engine.candidate_looks_chzzk(prepared, row.get("source_url") or row.get("input_url") or ""):
             prepared.pop("_download_info", None)
             prepared.pop("_download_info_key", None)
-        if clip_override or not (row and row.get("fixed_candidate")):
+        if frozen_active or clip_override or not (row and row.get("fixed_candidate")):
             prepared.pop("clip_range", None)
             prepared.pop("clip_cut_mode", None)
-            clip_range = self.current_clip_range()
+            if frozen_active:
+                clip_range = frozen_clip
+                cut_mode = frozen_cut
+            else:
+                clip_range = self.current_clip_range()
+                cut_mode = self.clip_cut_mode() if clip_range else None
             if clip_range:
                 prepared["clip_range"] = clip_range
-                prepared["clip_cut_mode"] = self.clip_cut_mode()
+                prepared["clip_cut_mode"] = cut_mode or self.clip_cut_mode()
         if prepared.get("clip_range"):
             if not prepared.get("clip_cut_mode"):
                 prepared["clip_cut_mode"] = self.clip_cut_mode()
@@ -1243,6 +1255,18 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.selected_row_index = -1
         self._analysis_auto_download = bool(auto_download)
         self._analysis_url = url
+        # Freeze clip intent at click time so later UI clip edits don't rewrite this download.
+        if auto_download:
+            try:
+                self._analysis_download_clip_range = self.current_clip_range()
+            except ValueError:
+                self._analysis_download_clip_range = None
+            self._analysis_download_clip_cut_mode = self.clip_cut_mode() if self._analysis_download_clip_range else None
+            self._analysis_download_clip_frozen = True
+        else:
+            self._analysis_download_clip_range = None
+            self._analysis_download_clip_cut_mode = None
+            self._analysis_download_clip_frozen = False
         self._playlist_event_candidates = []
         self._playlist_event_parent_id = ""
         self._cookie_permission_prompt_shown = False
@@ -1404,6 +1428,11 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
             target_row = self.rows[row_index] if row_index >= 0 else self.rows[0]
             self.selected_row_index = self.rows.index(target_row)
             self._refresh_row_selection()
+            if getattr(self, "_analysis_download_clip_frozen", False):
+                target_row["_frozen_download_clip_range"] = getattr(self, "_analysis_download_clip_range", None)
+                target_row["_frozen_download_clip_cut_mode"] = getattr(self, "_analysis_download_clip_cut_mode", None)
+                target_row["_frozen_download_clip_active"] = True
+            self._analysis_download_clip_frozen = False
             # Bind the resolved row object (not the shared selected index, which a
             # subsequent analysis can reset to -1 before this timer fires).
             QTimer.singleShot(0, lambda r=target_row: self.start_download_for_row(r))

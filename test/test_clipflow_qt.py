@@ -4031,6 +4031,129 @@ while window.active_downloads:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["2", "2", "1", "1"])
 
+    def test_clipflow_qt_auto_download_freezes_full_clip_intent_during_analysis(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+import time
+
+url = "https://media.test/watch/freeze-clip"
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    while not getattr(fake_download, "release", False):
+        time.sleep(0.01)
+    title = (candidate or {}).get("display_title") or "out"
+    return {"ok": True, "output_dir": output_dir, "output_path": str(output_dir) + f"/{title}.mp4", "target_url": page_url}
+
+fake_download.release = False
+app = QApplication([])
+window = ClipFlowWindow(download_func=fake_download)
+window.folder_input.setText("C:/Temp")
+window.url_input.setText(url)
+# Simulate download click with no clip: auto_download freezes full intent.
+window._analysis_auto_download = True
+window._analysis_download_clip_frozen = True
+window._analysis_download_clip_range = None
+window._analysis_download_clip_cut_mode = None
+# User sets clip while "analysis" is still in flight.
+window._applied_clip_start_text = "00:01:00"
+window._applied_clip_end_text = "00:12:00"
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Freeze Clip",
+    "candidates": [
+        {"id": "full", "source": url, "url": url, "title": "Freeze Clip", "display_title": "Freeze Clip", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": 3600, "sort_bytes": 600},
+    ],
+    "warnings": [],
+})
+for _ in range(50):
+    app.processEvents()
+    time.sleep(0.01)
+    if window.active_downloads:
+        break
+print(len(window.active_downloads))
+active = window.active_downloads[0]["candidate"] if window.active_downloads else {}
+print(bool(active.get("clip_range")))
+print((active.get("display_title") or ""))
+row = next((item for item in window.rows if window._row_is_downloading(item)), window.rows[0])
+window.start_download_for_row(row)
+for _ in range(50):
+    app.processEvents()
+    time.sleep(0.01)
+    if len(window.active_downloads) >= 2:
+        break
+print(len(window.rows))
+print(len(window.active_downloads))
+print(sum(1 for item in window.rows if (item.get("candidate") or {}).get("clip_range")))
+fake_download.release = True
+while window.active_downloads:
+    app.processEvents()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["1", "False", "Freeze Clip", "2", "2", "1"])
+
+    def test_clipflow_qt_full_download_then_clip_spawns_sibling_without_mutating_full_row(self):
+        script = r'''
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow
+
+url = "https://www.youtube.com/watch?v=xAxh-dEHcTk"
+
+def fake_download(page_url, candidate, output_dir, cookie_source=None, proxy_url=None, on_event=None):
+    import time
+    if on_event:
+        on_event({"type": "progress", "percent": 3, "message": "3.0%"})
+    while not getattr(fake_download, "release", False):
+        time.sleep(0.01)
+    title = (candidate or {}).get("display_title") or (candidate or {}).get("title") or "out"
+    return {"ok": True, "output_dir": output_dir, "output_path": str(output_dir) + f"/{title}.mp4", "target_url": page_url}
+
+fake_download.release = False
+
+app = QApplication([])
+window = ClipFlowWindow(download_func=fake_download)
+window.folder_input.setText("C:/Temp")
+window._analysis_finished({
+    "webpage_url": url,
+    "url": url,
+    "title": "Full Then Clip",
+    "candidates": [
+        {"id": "full", "source": url, "url": url, "title": "Full Then Clip", "display_title": "Full Then Clip", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": 600, "sort_bytes": 600},
+    ],
+    "warnings": [],
+})
+row = window.rows[0]
+window.start_download_for_row(row)
+while not window.active_downloads:
+    app.processEvents()
+window.clip_start_input.setText("00:01:00")
+window.clip_end_input.setText("00:02:00")
+window._apply_clip_range_popup()
+window.start_download_for_row(row)
+while len(window.active_downloads) < 2:
+    app.processEvents()
+titles = [(item.get("candidate") or {}).get("display_title") for item in window.rows]
+full_rows = [item for item in window.rows if not (item.get("candidate") or {}).get("clip_range")]
+clip_rows = [item for item in window.rows if (item.get("candidate") or {}).get("clip_range")]
+print(len(window.rows))
+print(len(window.active_downloads))
+print(len(full_rows))
+print(len(clip_rows))
+print((full_rows[0].get("candidate") or {}).get("display_title") if full_rows else "")
+print(bool((full_rows[0].get("candidate") or {}).get("clip_range")) if full_rows else "missing")
+print(sum("[01m00s-02m00s]" in str(title) for title in titles))
+fake_download.release = True
+while window.active_downloads:
+    app.processEvents()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["2", "2", "1", "1", "Full Then Clip", "False", "1"])
+
     def test_clipflow_qt_first_clip_download_does_not_spawn_full_video_row(self):
         script = r'''
 from PySide6.QtWidgets import QApplication
@@ -4152,6 +4275,74 @@ tempdir.cleanup()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["['newer', 'older']", "1", "true"])
+
+    def test_clipflow_qt_existing_output_redirects_notice_to_original_completed_card(self):
+        script = r'''
+from pathlib import Path
+import tempfile
+from PySide6.QtWidgets import QApplication
+from tools.clipflow_qt import ClipFlowWindow, READY_STATUS, COMPLETED_STATUS
+
+url = "https://media.test/watch/already-owned"
+app = QApplication([])
+tempdir = tempfile.TemporaryDirectory()
+existing = Path(tempdir.name) / "Owned Video.mp4"
+existing.write_bytes(b"done-file")
+window = ClipFlowWindow(download_func=lambda *a, **k: (_ for _ in ()).throw(AssertionError("download should not run")))
+window._set_save_folder(tempdir.name)
+candidate = {"id": "owned", "source": url, "url": url, "title": "Owned Video", "display_title": "Owned Video", "thumbnail": "", "ext": "mp4", "output_ext": "mp4", "duration": 10, "sort_bytes": 10}
+original = {
+    "id": "original",
+    "kind": "video",
+    "candidate": dict(candidate),
+    "qualities": [dict(candidate)],
+    "quality_options": [dict(candidate)],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "source_url": url,
+    "input_url": url,
+    "status": COMPLETED_STATUS,
+    "status_detail": "",
+    "progress": 100,
+    "progress_text": "완료",
+    "output_path": str(existing),
+    "messages": [],
+    "created_order": 1,
+    "fixed_candidate": False,
+}
+fresh = {
+    "id": "fresh",
+    "kind": "video",
+    "candidate": dict(candidate),
+    "qualities": [dict(candidate)],
+    "quality_options": [dict(candidate)],
+    "selected_index": 0,
+    "selected_format_index": 0,
+    "source_url": url,
+    "input_url": url,
+    "status": READY_STATUS,
+    "progress": 0,
+    "progress_text": "",
+    "output_path": "",
+    "messages": [],
+    "created_order": 2,
+}
+window.rows = [fresh, original]
+window._render_rows()
+window.selected_row_index = 0
+window.start_download_for_row(fresh)
+ids = [row["id"] for row in window.rows]
+owner = next(row for row in window.rows if row["id"] == "original")
+print(ids)
+print(owner.get("status_detail"))
+print(owner["widget"].property("existingFlash"))
+print(any(row["id"] == "fresh" for row in window.rows))
+tempdir.cleanup()
+'''
+        result = run_qt_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["['original']", "이미 있는 파일", "true", "False"])
 
     def test_clipflow_qt_partial_existing_output_does_not_skip_retry(self):
         script = r'''
