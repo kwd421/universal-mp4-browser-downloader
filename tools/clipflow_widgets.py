@@ -6,7 +6,22 @@ from urllib.parse import urljoin, urlparse
 from PySide6.QtCore import QElapsedTimer, QEvent, QEasingCurve, QObject, QPoint, QPropertyAnimation, Property, QRect, QRectF, QSize, QSizeF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QAbstractButton, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QAbstractButton,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSizePolicy,
+    QTextBrowser,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 from shiboken6 import isValid
 
 try:
@@ -1140,7 +1155,8 @@ class UpdateAvailableBanner(QFrame):
         else:
             self.message_label.setText("새 버전이 있습니다")
         notes = str(info.get("release_notes_url") or "").strip()
-        self.details_button.setVisible(bool(notes))
+        # Show details whenever we have a version or notes URL (dialog can fall back to Pages URL).
+        self.details_button.setVisible(bool(version or notes))
         self.adjustSize()
 
     def update_info(self):
@@ -1149,6 +1165,89 @@ class UpdateAvailableBanner(QFrame):
     def _dismiss(self):
         self.hide()
         self.dismissed.emit()
+
+
+class UpdateNotesDialog(QDialog):
+    update_requested = Signal()
+
+    def __init__(self, parent=None, version="", notes_url=""):
+        super().__init__(parent)
+        version = str(version or "").strip()
+        self._notes_url = str(notes_url or "").strip()
+        self.setWindowTitle(f"ClipFlow {version} 변경 사항" if version else "업데이트 상세")
+        self.setModal(True)
+        self.setMinimumSize(480, 420)
+        self.resize(520, 480)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(12)
+
+        title = QLabel(f"ClipFlow {version}" if version else "업데이트")
+        title.setObjectName("WindowTitle")
+        layout.addWidget(title)
+
+        self.body = QTextBrowser(self)
+        self.body.setOpenExternalLinks(False)
+        self.body.setOpenLinks(False)
+        self.body.setPlaceholderText("변경 사항을 불러오는 중…")
+        layout.addWidget(self.body, 1)
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        close_button = OutlinedButton("닫기")
+        close_button.setObjectName("SecondaryButton")
+        close_button.setCursor(Qt.PointingHandCursor)
+        close_button.clicked.connect(self.reject)
+        update_button = OutlinedButton("업데이트")
+        update_button.setObjectName("PrimaryPopupButton")
+        update_button.setCursor(Qt.PointingHandCursor)
+        update_button.clicked.connect(self._request_update)
+        buttons.addWidget(close_button)
+        buttons.addWidget(update_button)
+        layout.addLayout(buttons)
+
+        self._network = QNetworkAccessManager(self)
+        self._reply = None
+        if self._notes_url:
+            self._load_notes(self._notes_url)
+        else:
+            self.body.setPlainText("표시할 변경 사항 링크가 없습니다.")
+
+    def _request_update(self):
+        self.update_requested.emit()
+        self.accept()
+
+    def _load_notes(self, url):
+        self.body.setPlainText("변경 사항을 불러오는 중…")
+        request = QNetworkRequest(QUrl(url))
+        request.setHeader(QNetworkRequest.UserAgentHeader, "ClipFlow-Updater")
+        self._reply = self._network.get(request)
+        self._reply.finished.connect(self._on_notes_loaded)
+
+    def _on_notes_loaded(self):
+        reply = self._reply
+        self._reply = None
+        if reply is None:
+            return
+        try:
+            if reply.error() != QNetworkReply.NoError:
+                self.body.setPlainText(f"변경 사항을 불러오지 못했습니다.\n{reply.errorString()}")
+                return
+            raw = bytes(reply.readAll())
+            text = raw.decode("utf-8", errors="replace").strip()
+            if not text:
+                self.body.setPlainText("변경 사항이 비어 있습니다.")
+                return
+            # Prefer markdown rendering when available (Qt 5.14+ / PySide6).
+            if hasattr(self.body, "setMarkdown"):
+                self.body.setMarkdown(text)
+            else:
+                self.body.setPlainText(text)
+        finally:
+            reply.deleteLater()
 
 
 class ThumbnailPlaceholder(QFrame):

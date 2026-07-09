@@ -476,18 +476,19 @@ class SettingsMixin:
     def _open_update_details(self):
         toast = getattr(self, "update_toast", None)
         info = toast.update_info() if toast is not None and hasattr(toast, "update_info") else {}
+        version = str((info or {}).get("version") or "").strip()
         url = str((info or {}).get("release_notes_url") or "").strip()
-        if not url:
+        if not url and version:
+            url = f"https://kwd421.github.io/ClipFlow/ClipFlow-{version}.md"
+        if not url and not version:
             return
         try:
-            from PySide6.QtGui import QDesktopServices
-            from PySide6.QtCore import QUrl
+            from tools.clipflow_widgets import UpdateNotesDialog
         except ImportError:
-            import webbrowser
-
-            webbrowser.open(url)
-            return
-        QDesktopServices.openUrl(QUrl(url))
+            from clipflow_widgets import UpdateNotesDialog
+        dialog = UpdateNotesDialog(self, version=version, notes_url=url)
+        dialog.update_requested.connect(self._open_update_installer)
+        dialog.exec()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
