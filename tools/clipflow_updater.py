@@ -113,7 +113,7 @@ def _build_number_int(value):
     return None
 
 
-def _latest_appcast_item(feed_url):
+def _fetch_appcast_root(feed_url):
     request = urllib.request.Request(feed_url, headers={"User-Agent": "ClipFlow-Updater"})
     with urllib.request.urlopen(request, timeout=15) as response:
         chunks = []
@@ -126,8 +126,10 @@ def _latest_appcast_item(feed_url):
             if total > _MAX_APPCAST_BYTES:
                 raise RuntimeError("Appcast feed too large")
             chunks.append(block)
-        root = ET.fromstring(b"".join(chunks))
-    item = root.find("channel/item")
+        return ET.fromstring(b"".join(chunks))
+
+
+def _appcast_item_dict(item):
     if item is None:
         return None
     version_el = item.find(SPARKLE_VERSION_TAG)
@@ -146,11 +148,34 @@ def _latest_appcast_item(feed_url):
     if notes_el is None:
         notes_el = item.find("link")
     notes_url = (notes_el.text or "").strip() if notes_el is not None else ""
+    version = short_version or str(build)
+    if not notes_url and version:
+        notes_url = f"https://kwd421.github.io/ClipFlow/ClipFlow-{version}.md"
     return {
         "build": build,
-        "version": short_version or str(build),
+        "version": version,
         "release_notes_url": notes_url,
     }
+
+
+def _appcast_items(feed_url):
+    """All appcast items, newest build first."""
+    root = _fetch_appcast_root(feed_url)
+    channel = root.find("channel")
+    if channel is None:
+        return []
+    items = []
+    for item in channel.findall("item"):
+        parsed = _appcast_item_dict(item)
+        if parsed:
+            items.append(parsed)
+    items.sort(key=lambda entry: int(entry.get("build") or 0), reverse=True)
+    return items
+
+
+def _latest_appcast_item(feed_url):
+    items = _appcast_items(feed_url)
+    return items[0] if items else None
 
 
 def _latest_appcast_build_number(feed_url):
@@ -161,23 +186,33 @@ def _latest_appcast_build_number(feed_url):
 
 
 def fetch_startup_update_info():
-    """Return latest update info dict if newer than current, else None."""
+    """Return update info if newer than current, else None.
+
+    Includes ``pending_notes``: every appcast item newer than the installed
+    build (newest first), so the details dialog can show skipped versions too.
+    """
     current = _build_number_int(updater_build_number())
     if current is None:
         return None
     for feed_url in updater_feed_url_candidates():
         try:
-            item = _latest_appcast_item(feed_url)
+            items = _appcast_items(feed_url)
         except Exception:
             continue
-        if not item:
+        pending = [item for item in items if int(item.get("build") or 0) > current]
+        if not pending:
             continue
-        latest = item.get("build")
-        if latest is None or latest <= current:
-            continue
-        return item
+        latest = dict(pending[0])
+        latest["pending_notes"] = [
+            {
+                "build": item.get("build"),
+                "version": item.get("version"),
+                "release_notes_url": item.get("release_notes_url"),
+            }
+            for item in pending
+        ]
+        return latest
     return None
-
 
 def startup_update_is_available():
     return fetch_startup_update_info() is not None

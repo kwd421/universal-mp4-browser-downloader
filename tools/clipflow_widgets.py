@@ -1452,19 +1452,44 @@ class UpdateAvailableBanner(QFrame):
 class UpdateNotesDialog(AppDialog):
     update_requested = Signal()
 
-    def __init__(self, parent=None, version="", notes_url=""):
+    def __init__(self, parent=None, version="", notes_url="", notes_entries=None):
+        # notes_entries: list of {version, release_notes_url} for skipped versions
+        # (newest first). Falls back to a single notes_url when empty.
+        entries = []
+        for entry in notes_entries or []:
+            if not isinstance(entry, dict):
+                continue
+            entry_version = str(entry.get("version") or "").strip()
+            entry_url = str(entry.get("release_notes_url") or "").strip()
+            if not entry_url and entry_version:
+                entry_url = f"https://kwd421.github.io/ClipFlow/ClipFlow-{entry_version}.md"
+            if entry_url:
+                entries.append({"version": entry_version, "release_notes_url": entry_url})
         self._version = str(version or "").strip()
         self._notes_url = str(notes_url or "").strip()
+        if not entries and self._notes_url:
+            entries = [{"version": self._version, "release_notes_url": self._notes_url}]
+        self._entries = entries
+        versions = [str(item.get("version") or "").strip() for item in self._entries if item.get("version")]
+        if len(versions) >= 2:
+            # entries are newest-first; title shows range oldest → newest
+            title_label = f"ClipFlow {versions[-1]}–{versions[0]}"
+        elif versions:
+            title_label = f"ClipFlow {versions[0]}"
+        elif self._version:
+            title_label = f"ClipFlow {self._version}"
+        else:
+            title_label = "업데이트"
         super().__init__(
             parent,
-            window_title=f"ClipFlow {self._version} 변경 사항" if self._version else "업데이트 상세",
-            title_text=f"ClipFlow {self._version}" if self._version else "업데이트",
+            window_title=f"{title_label} 변경 사항" if title_label != "업데이트" else "업데이트 상세",
+            title_text=title_label,
             detail_text="",
             minimum_width=500,
             minimum_height=440,
         )
         self.resize(540, 500)
-        self.set_title_text(f"ClipFlow {self._version}" if self._version else "업데이트", object_name="UpdateNotesTitle")
+        self.set_title_text(title_label, object_name="UpdateNotesTitle")
 
         self.body = QTextBrowser(self)
         self.body.setObjectName("UpdateNotesBody")
@@ -1486,15 +1511,16 @@ class UpdateNotesDialog(AppDialog):
 
         self._network = QNetworkAccessManager(self)
         self._reply = None
-        if self._notes_url:
-            self._load_notes(self._notes_url)
+        self._load_queue = list(self._entries)
+        self._loaded_sections = []  # (version, markdown text), newest first
+        if self._load_queue:
+            self._load_next_notes()
         else:
             self.body.setPlainText("표시할 변경 사항 링크가 없습니다.")
 
     def _request_update(self):
         self.update_requested.emit()
         self.finish("update")
-
     def _notes_font_family(self):
         try:
             family = theme.preferred_font_family()
@@ -1548,7 +1574,7 @@ class UpdateNotesDialog(AppDialog):
         return "\n".join(lines).strip()
 
     def _set_notes_text(self, text):
-        prepared = self._strip_leading_version_heading(text)
+        prepared = str(text or "").strip()
         if not prepared:
             self.body.setPlainText("변경 사항이 비어 있습니다.")
             return
@@ -1558,8 +1584,21 @@ class UpdateNotesDialog(AppDialog):
         else:
             self.body.setPlainText(prepared)
 
-    def _load_notes(self, url):
-        self.body.setPlainText("변경 사항을 불러오는 중…")
+    def _load_next_notes(self):
+        if not self._load_queue:
+            self._render_combined_notes()
+            return
+        entry = self._load_queue.pop(0)
+        self._active_entry = entry
+        url = str(entry.get("release_notes_url") or "").strip()
+        if not url:
+            version = str(entry.get("version") or "").strip() or "알 수 없음"
+            self._loaded_sections.append((version, "_변경 사항 링크가 없습니다._"))
+            self._load_next_notes()
+            return
+        remaining = len(self._load_queue)
+        total = remaining + 1 + len(self._loaded_sections)
+        self.body.setPlainText(f"변경 사항을 불러오는 중… ({len(self._loaded_sections) + 1}/{total})")
         request = QNetworkRequest(QUrl(url))
         request.setHeader(QNetworkRequest.UserAgentHeader, "ClipFlow-Updater")
         self._reply = self._network.get(request)
@@ -1568,21 +1607,38 @@ class UpdateNotesDialog(AppDialog):
     def _on_notes_loaded(self):
         reply = self._reply
         self._reply = None
+        entry = getattr(self, "_active_entry", None) or {}
+        version = str(entry.get("version") or "").strip() or "알 수 없음"
         if reply is None:
+            self._loaded_sections.append((version, "_변경 사항을 불러오지 못했습니다._"))
+            self._load_next_notes()
             return
         try:
             if reply.error() != QNetworkReply.NoError:
-                self.body.setPlainText(f"변경 사항을 불러오지 못했습니다.\n{reply.errorString()}")
-                return
-            raw = bytes(reply.readAll())
-            text = raw.decode("utf-8", errors="replace").strip()
-            if not text:
-                self.body.setPlainText("변경 사항이 비어 있습니다.")
-                return
-            self._set_notes_text(text)
+                self._loaded_sections.append(
+                    (version, f"_변경 사항을 불러오지 못했습니다. ({reply.errorString()})_")
+                )
+            else:
+                raw = bytes(reply.readAll())
+                text = raw.decode("utf-8", errors="replace").strip()
+                body = self._strip_leading_version_heading(text) if text else ""
+                self._loaded_sections.append((version, body or "_변경 사항이 비어 있습니다._"))
         finally:
             reply.deleteLater()
+        self._load_next_notes()
 
+    def _render_combined_notes(self):
+        if not self._loaded_sections:
+            self.body.setPlainText("변경 사항이 비어 있습니다.")
+            return
+        if len(self._loaded_sections) == 1:
+            _version, body = self._loaded_sections[0]
+            self._set_notes_text(body)
+            return
+        chunks = []
+        for version, body in self._loaded_sections:
+            chunks.append(f"## ClipFlow {version}\n\n{body}".rstrip())
+        self._set_notes_text("\n\n---\n\n".join(chunks))
 
 class ThumbnailPlaceholder(QFrame):
     _network_manager = None

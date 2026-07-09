@@ -486,18 +486,23 @@ class SettingsMixin:
         info = toast.update_info() if toast is not None and hasattr(toast, "update_info") else {}
         version = str((info or {}).get("version") or "").strip()
         url = str((info or {}).get("release_notes_url") or "").strip()
+        pending = list((info or {}).get("pending_notes") or [])
         if not url and version:
             url = f"https://kwd421.github.io/ClipFlow/ClipFlow-{version}.md"
-        if not url and not version:
+        if not pending and not url and not version:
             return
         try:
             from tools.clipflow_widgets import UpdateNotesDialog
         except ImportError:
             from clipflow_widgets import UpdateNotesDialog
-        dialog = UpdateNotesDialog(self, version=version, notes_url=url)
+        dialog = UpdateNotesDialog(
+            self,
+            version=version,
+            notes_url=url,
+            notes_entries=pending or None,
+        )
         dialog.update_requested.connect(self._open_update_installer)
         dialog.exec()
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_update_toast()
