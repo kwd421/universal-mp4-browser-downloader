@@ -27,9 +27,6 @@ from shiboken6 import isValid
 try:
     from tools.clipflow_cache import load_cached_thumbnail_bytes, store_cached_thumbnail_bytes
     from tools.clipflow_icons import (
-        ICON_COLOR,
-        ICON_DISABLED_COLOR,
-        ICON_HOVER_COLOR,
         LucideIconButton,
         LucideIconWidget,
         lucide_pixmap,
@@ -39,9 +36,6 @@ try:
 except ImportError:
     from clipflow_cache import load_cached_thumbnail_bytes, store_cached_thumbnail_bytes
     from clipflow_icons import (
-        ICON_COLOR,
-        ICON_DISABLED_COLOR,
-        ICON_HOVER_COLOR,
         LucideIconButton,
         LucideIconWidget,
         lucide_pixmap,
@@ -60,7 +54,8 @@ class RoundedFrame(QFrame):
         self.radius = radius
         self.border_width = border_width
         self.background = background or theme.SURFACE
-        self.border = border or theme.GRAPHITE
+        # Default outline matches FieldBox / SecondaryButton / CleanComboBox.
+        self.border = border or theme.FIELD_BORDER
         self.setAttribute(Qt.WA_StyledBackground, False)
 
     def set_colors(self, background=None, border=None):
@@ -74,9 +69,14 @@ class RoundedFrame(QFrame):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        inset = max(1.0, self.border_width / 2)
-        rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
-        painter.setPen(QPen(QColor(self.border), self.border_width))
+        border_width = float(self.border_width or 0)
+        if border_width > 0:
+            inset = max(1.0, border_width / 2)
+            rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
+            painter.setPen(QPen(QColor(self.border), border_width))
+        else:
+            rect = QRectF(self.rect())
+            painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(self.background))
         painter.drawRoundedRect(rect, self.radius, self.radius)
 
@@ -117,16 +117,17 @@ class OutlinedButton(QPushButton):
             border = theme.GRAPHITE
             text = theme.ON_ACCENT
         elif enabled and active:
-            bg = theme.SURFACE_SOFT
-            border = theme.GRAPHITE
+            bg = theme.FIELD_FILL_HOVER
+            # Secondary chrome shares fill/outline with cookie combo / URL FieldBox.
+            border = theme.FIELD_BORDER_HOVER
             text = theme.INK
         elif enabled:
-            bg = theme.SURFACE
-            border = theme.GRAPHITE
+            bg = theme.FIELD_FILL
+            border = theme.FIELD_BORDER
             text = theme.INK
         else:
-            bg = theme.SURFACE
-            border = theme.BORDER_STRONG
+            bg = theme.FIELD_FILL
+            border = theme.FIELD_BORDER
             text = theme.MUTED_SOFT
         inset = max(1.0, self.border_width / 2)
         rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
@@ -339,9 +340,7 @@ class CleanCheckBox(QCheckBox):
     _GAP = 8
     _LABELED_BOX = 18
     _LABELED_GAP = 9
-    # Near-black outline/fill — reads clearly on white rows and dialogs.
-    _STROKE = "#111111"
-    _FILL = "#111111"
+    # Checkbox chrome follows theme primary (dark UI: light fill / light stroke).
 
     def __init__(self, text="", parent=None):
         # Accept either CleanCheckBox(parent) or CleanCheckBox("label", parent).
@@ -382,7 +381,7 @@ class CleanCheckBox(QCheckBox):
     @staticmethod
     def _draw_check_mark(painter, box_rect):
         """Crisp vector check — avoids scaled SVG pixmap shimmer."""
-        pen = QPen(QColor("#FFFFFF"))
+        pen = QPen(QColor(theme.ON_ACCENT))
         pen.setWidthF(2.0)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
@@ -418,15 +417,15 @@ class CleanCheckBox(QCheckBox):
         radius = 4.0
         if self.isChecked():
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(self._FILL))
+            painter.setBrush(QColor(theme.GRAPHITE))
             painter.drawRoundedRect(QRectF(x, y, size, size), radius + 1, radius + 1)
             self._draw_check_mark(painter, QRectF(x, y, size, size))
         else:
-            pen = QPen(QColor(self._STROKE))
+            pen = QPen(QColor(theme.FIELD_BORDER))
             pen.setWidthF(stroke)
             pen.setJoinStyle(Qt.RoundJoin)
             painter.setPen(pen)
-            painter.setBrush(QColor("#FFFFFF"))
+            painter.setBrush(QColor(theme.SURFACE))
             painter.drawRoundedRect(rect, radius, radius)
         if labeled:
             painter.setPen(QColor(theme.INK))
@@ -490,7 +489,7 @@ class CleanSwitch(QAbstractButton):
         enabled = self.isEnabled()
         checked = self.isChecked()
         track_color = theme.GRAPHITE if checked and enabled else theme.SURFACE
-        border_color = theme.GRAPHITE if enabled else theme.BORDER_STRONG
+        border_color = theme.FIELD_BORDER if enabled else theme.BORDER_STRONG
         knob_color = theme.ON_ACCENT if checked and enabled else (theme.MUTED_SOFT if not enabled else theme.SURFACE)
         rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
         painter.setPen(QPen(QColor(border_color), 1.4))
@@ -499,7 +498,7 @@ class CleanSwitch(QAbstractButton):
         knob_size = 18
         knob_x = 4 + (self.width() - knob_size - 8) * self._knob_progress
         knob_rect = QRectF(knob_x, (self.height() - knob_size) / 2, knob_size, knob_size)
-        painter.setPen(QPen(QColor(theme.GRAPHITE if enabled else theme.BORDER_STRONG), 1.0) if not checked else Qt.NoPen)
+        painter.setPen(QPen(QColor(theme.FIELD_BORDER if enabled else theme.BORDER_STRONG), 1.0) if not checked else Qt.NoPen)
         painter.setBrush(QColor(knob_color))
         painter.drawRoundedRect(knob_rect, 6, 6)
 
@@ -528,19 +527,21 @@ class ClearingUrlInput(QLineEdit):
         super().insertFromMimeData(source)
         self.pasted.emit()
 
-    def _sync_field_box_border(self):
+    def _sync_field_box_border(self, focused=False):
         box = self.parent()
         if box is not None and box.objectName() == "FieldBox":
             if hasattr(box, "set_colors"):
-                box.set_colors(border=theme.GRAPHITE)
+                # Match SecondaryButton chrome (구간선택 / 저장 위치).
+                box.set_colors(border=theme.ACCENT if focused else theme.FIELD_BORDER)
+                box.update()
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
-        self._sync_field_box_border()
+        self._sync_field_box_border(focused=True)
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
-        self._sync_field_box_border()
+        self._sync_field_box_border(focused=False)
 
 
 class PathDisplayInput(QLineEdit):
@@ -554,8 +555,11 @@ class PathDisplayInput(QLineEdit):
         box = self.parent()
         if box is not None and box.objectName() == "FieldBox":
             box.setProperty("focused", "true" if focused else "false")
+            if hasattr(box, "set_colors"):
+                box.set_colors(border=theme.ACCENT if focused else theme.FIELD_BORDER)
             box.style().unpolish(box)
             box.style().polish(box)
+            box.update()
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
@@ -564,6 +568,7 @@ class PathDisplayInput(QLineEdit):
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
         self._set_field_focus(False)
+
 
 
 class TimecodeInput(QWidget):
@@ -794,7 +799,7 @@ class TimecodeInput(QWidget):
         for index, label in enumerate(labels):
             selected = index == self._selected_segment and self.hasFocus()
             rect = self._segment_rects[index]
-            painter.setPen(QPen(QColor(theme.ACCENT if selected else theme.GRAPHITE), 1.4))
+            painter.setPen(QPen(QColor(theme.ACCENT if selected else theme.FIELD_BORDER), 1.4))
             painter.setBrush(QColor(theme.ACCENT_TINT if selected else theme.SURFACE))
             painter.drawRoundedRect(rect, 7, 7)
             color = theme.MUTED if self._parts[index] is None else theme.INK
@@ -937,6 +942,10 @@ def external_favicon_lookup_url(url):
     return f"https://t0.gstatic.com/faviconV2?{query}"
 
 
+# Brand hues stay intact; only alpha softens so favicons don't glare.
+FAVICON_PAINT_OPACITY = 0.78
+
+
 def square_favicon_pixmap(pixmap, size=20, device_ratio=1.0):
     if pixmap.isNull():
         return pixmap
@@ -1013,6 +1022,8 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
         super().__init__(parent)
         self.source_url = ""
         self.favicon_url = ""
+        # fallback | remote | youtube — fallback paints live theme.ICON (not a baked QIcon).
+        self._icon_mode = "fallback"
         self._reply = None
         self._icon_candidates = []
         self._seen_icon_candidates = set()
@@ -1050,12 +1061,15 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             self.favicon_url = ""
             return
         if domain in {"youtube.com", "youtu.be"} or domain.endswith(".youtube.com"):
+            self._icon_mode = "youtube"
             self.setIcon(QIcon(self._youtube_icon(20)))
             self.favicon_url = ""
             return
         cached = self._icon_cache.get(domain)
         if cached:
+            self._icon_mode = "remote"
             self.setIcon(cached)
+            self.favicon_url = ""
             return
         self._icon_candidates = []
         self._seen_icon_candidates = set()
@@ -1067,7 +1081,11 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
         self._fetch_next_icon_candidate()
 
     def _set_fallback_icon(self):
-        self.setIcon(QIcon(lucide_pixmap("globe-2", 20, ICON_COLOR)))
+        # Globe is theme-independent; paintEvent uses fixed FAVICON_GLOBE.
+        self._icon_mode = "fallback"
+        self.favicon_url = ""
+        self.setIcon(QIcon())
+        self.update()
 
     def _icon_target_rect(self):
         icon_size = self.iconSize()
@@ -1076,6 +1094,7 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
 
     @classmethod
     def _youtube_icon(cls, size):
+        # Brand colors fixed (not theme-tinted). Soften only via paint opacity.
         cached = cls._youtube_icon_cache.get(size)
         if cached:
             return cached
@@ -1084,14 +1103,14 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#FF0000"))
+        painter.setBrush(QColor(theme.YOUTUBE_RED))
         painter.drawRoundedRect(QRectF(0.5, 2, size - 1, size - 4), 4, 4)
         play = QPainterPath()
         play.moveTo(size * 0.40, size * 0.31)
         play.lineTo(size * 0.40, size * 0.69)
         play.lineTo(size * 0.72, size * 0.50)
         play.closeSubpath()
-        painter.setBrush(QColor("#FFFFFF"))
+        painter.setBrush(QColor(theme.YOUTUBE_PLAY))
         painter.drawPath(play)
         painter.end()
         cls._youtube_icon_cache[size] = pixmap
@@ -1107,7 +1126,19 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             painter.drawRoundedRect(QRectF(self.rect()), 5, 5)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         rect = self._icon_target_rect()
-        pixmap = self.icon().pixmap(rect.size())
+        if self._icon_mode == "fallback":
+            # Fixed neutral gray on both themes — favicon chrome does not flip with mode.
+            size = max(1, rect.width())
+            color = theme.FAVICON_GLOBE if self.isEnabled() else theme.ICON_DISABLED
+            pixmap = lucide_pixmap("globe-2", size, color)
+            painter.setOpacity(1.0)
+        elif self._icon_mode == "youtube":
+            pixmap = self._youtube_icon(max(1, rect.width()))
+            painter.setOpacity(FAVICON_PAINT_OPACITY)
+        else:
+            # Keep site brand colors; only dim slightly so they don't glare.
+            pixmap = self.icon().pixmap(rect.size())
+            painter.setOpacity(FAVICON_PAINT_OPACITY)
         if not pixmap.isNull():
             painter.drawPixmap(rect, pixmap)
 
@@ -1143,7 +1174,8 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
             self._reply = reply
             reply.finished.connect(lambda reply=reply, page_url=page_url: self._icon_page_finished(reply, page_url))
             return
-        self.favicon_url = ""
+        # All candidates failed — keep live globe (theme-aware), not a frozen black pixmap.
+        self._set_fallback_icon()
 
     def _favicon_finished(self, reply, domain, favicon_url):
         if not isValid(self):
@@ -1166,7 +1198,9 @@ class SourceLinkButton(AboveTooltipMixin, QToolButton):
                 icon = QIcon(square_favicon_pixmap(pixmap, self.iconSize().width() or 20, ratio))
                 self._icon_cache[domain] = icon
                 if domain == source_domain(self.source_url):
+                    self._icon_mode = "remote"
                     self.setIcon(icon)
+                    self.update()
             else:
                 self._fetch_next_icon_candidate()
         finally:
@@ -1209,12 +1243,13 @@ class ComboPopup(QFrame):
         painter.setRenderHint(QPainter.Antialiasing)
         outer = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         inner = outer.adjusted(1.4, 1.4, -1.4, -1.4)
+        outline = theme.FIELD_BORDER
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(theme.GRAPHITE))
+        painter.setBrush(QColor(outline))
         painter.drawRoundedRect(outer, 10, 10)
         painter.setBrush(QColor(theme.SURFACE))
         painter.drawRoundedRect(inner, 8.6, 8.6)
-        painter.setPen(QPen(QColor(theme.GRAPHITE), 1.4))
+        painter.setPen(QPen(QColor(outline), 1.4))
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(outer.adjusted(0.7, 0.7, -0.7, -0.7), 9.3, 9.3)
 
@@ -1244,15 +1279,21 @@ class CleanComboBox(QComboBox):
         rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
         enabled = self.isEnabled()
         hovered = self.underMouse()
-        border_color = theme.GRAPHITE
+        # Same chrome as SecondaryButton / FieldBox (저장 위치, URL 필드).
+        border_color = theme.FIELD_BORDER_HOVER if enabled and hovered else theme.FIELD_BORDER
         text_color = theme.INK if enabled else theme.MUTED_SOFT
-        background = theme.SURFACE_SOFT if enabled and hovered else (theme.SURFACE if enabled else theme.SURFACE_SUNKEN)
+        background = (
+            theme.FIELD_FILL_HOVER if enabled and hovered else (theme.FIELD_FILL if enabled else theme.SURFACE_SUNKEN)
+        )
 
-        painter.setPen(QPen(QColor(border_color if enabled else theme.GRAPHITE), 1.4))
+        painter.setPen(QPen(QColor(border_color if enabled else theme.FIELD_BORDER), 1.4))
         painter.setBrush(QColor(background))
         painter.drawRoundedRect(rect, 8, 8)
 
-        enabled_icon_color = ICON_HOVER_COLOR if enabled and hovered else (ICON_COLOR if enabled else ICON_DISABLED_COLOR)
+        # Live theme tokens (import-time ICON_COLOR freezes light black).
+        enabled_icon_color = (
+            theme.ICON_HOVER if enabled and hovered else (theme.ICON if enabled else theme.ICON_DISABLED)
+        )
         text = self.currentText()
         text_font = painter.font()
         text_font.setPixelSize(13)
@@ -1281,7 +1322,9 @@ class CleanComboBox(QComboBox):
             painter.drawText(text_rect, Qt.AlignVCenter | self.text_alignment, text)
 
         if self.show_arrow:
-            arrow_color = ICON_HOVER_COLOR if enabled and hovered else (ICON_COLOR if enabled else ICON_DISABLED_COLOR)
+            arrow_color = (
+                theme.ICON_HOVER if enabled and hovered else (theme.ICON if enabled else theme.ICON_DISABLED)
+            )
             painter.drawPixmap(self.width() - 22, (self.height() - 14) // 2, 14, 14, lucide_pixmap("chevron-down", 14, arrow_color))
 
     def enterEvent(self, event):
@@ -1537,7 +1580,7 @@ class UpdateNotesDialog(AppDialog):
             body {{
                 font-family: '{family}', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Helvetica Neue', 'Segoe UI', sans-serif;
                 font-size: 14px;
-                color: #171717;
+                color: {theme.INK};
                 line-height: 1.55;
             }}
             h1 {{ font-size: 22px; font-weight: 700; margin: 0 0 10px 0; line-height: 1.25; }}

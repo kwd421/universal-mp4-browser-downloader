@@ -27,7 +27,8 @@ try:
     from tools import clipflow_theme as theme
     from tools.clipflow_theme import (
         APP_NAME, APP_STYLE, COOKIE_DISPLAY_CHOICES, DEFAULT_OUTPUT_EXT,
-        TOP_FIELD_HEIGHT, apply_tracking, configure_app_font, cookie_source_from_display, create_app_icon,
+        THEME_MODE_SETTING, TOP_FIELD_HEIGHT, apply_theme_mode, apply_tracking,
+        configure_app_font, cookie_source_from_display, create_app_icon,
     )
     from tools.clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
     from tools.clipflow_widgets import AppDialog, CleanComboBox, ClearingUrlInput, ComboPopup, OutlinedButton, PathDisplayInput, PrimaryActionButton, RoundedFrame, TimecodeInput
@@ -46,7 +47,8 @@ except ImportError:
     import clipflow_theme as theme
     from clipflow_theme import (
         APP_NAME, APP_STYLE, COOKIE_DISPLAY_CHOICES, DEFAULT_OUTPUT_EXT,
-        TOP_FIELD_HEIGHT, apply_tracking, configure_app_font, cookie_source_from_display, create_app_icon,
+        THEME_MODE_SETTING, TOP_FIELD_HEIGHT, apply_theme_mode, apply_tracking,
+        configure_app_font, cookie_source_from_display, create_app_icon,
     )
     from clipflow_icons import LucideIconButton, LucideIconWidget, TooltipManager, lucide_pixmap
     from clipflow_widgets import AppDialog, CleanComboBox, ClearingUrlInput, ComboPopup, OutlinedButton, PathDisplayInput, PrimaryActionButton, RoundedFrame, TimecodeInput
@@ -119,7 +121,8 @@ def checkbox_outline_pixmap(size, color, checked=False):
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing, True)
     stroke = 2.0 * scale
-    pen = QPen(QColor(color or "#111111"))
+    fill = color or theme.GRAPHITE
+    pen = QPen(QColor(fill))
     pen.setWidthF(stroke)
     pen.setJoinStyle(Qt.RoundJoin)
     pen.setCapStyle(Qt.RoundCap)
@@ -128,9 +131,9 @@ def checkbox_outline_pixmap(size, color, checked=False):
     radius = 4.0 * scale
     if checked:
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(color or "#111111"))
+        painter.setBrush(QColor(fill))
         painter.drawRoundedRect(QRectF(0, 0, pixel, pixel), radius + scale, radius + scale)
-        check_pen = QPen(QColor("#FFFFFF"))
+        check_pen = QPen(QColor(theme.ON_ACCENT))
         check_pen.setWidthF(2.0 * scale)
         check_pen.setCapStyle(Qt.RoundCap)
         check_pen.setJoinStyle(Qt.RoundJoin)
@@ -143,7 +146,7 @@ def checkbox_outline_pixmap(size, color, checked=False):
         painter.drawPath(path)
     else:
         painter.setPen(pen)
-        painter.setBrush(QColor("#FFFFFF"))
+        painter.setBrush(QColor(theme.SURFACE))
         painter.drawRoundedRect(box, radius, radius)
     painter.end()
     pixmap.setDevicePixelRatio(scale)
@@ -223,6 +226,10 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         if self.sort_key not in SORT_LABELS:
             self.sort_key = "latest"
         self.sort_desc = str(self.settings.value(SORT_DESC_SETTING, "true", str)).lower() != "false"
+        self._theme_mode = str(self.settings.value(THEME_MODE_SETTING, "light", str) or "light").lower()
+        if self._theme_mode not in {"light", "dark"}:
+            self._theme_mode = "light"
+        apply_theme_mode(self._theme_mode)
         self.open_url_func = open_url_func or (lambda url: QDesktopServices.openUrl(QUrl(url)))
         self.confirm_delete_func = confirm_delete_func
         self.playlist_choice_func = playlist_choice_func
@@ -251,7 +258,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.setWindowIcon(create_app_icon())
         self.setMinimumSize(WINDOW_MINIMUM_SIZE)
         self.resize(self._initial_window_size())
-        self.setStyleSheet(APP_STYLE)
+        self.setStyleSheet(theme.APP_STYLE)
         self._build_ui()
         self._load_completed_history()
         self._refresh_primary_action()
@@ -339,11 +346,12 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     def _build_ui(self):
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(10)
 
         layout.addWidget(self._build_input_panel())
         layout.addWidget(self._build_list_panel(), 1)
+        layout.addWidget(self._build_footer())
         self.setCentralWidget(root)
 
     def _build_header(self):
@@ -396,7 +404,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         return super().eventFilter(obj, event)
 
     def _panel(self):
-        frame = RoundedFrame(radius=12, border_width=1.4, background=theme.SURFACE, border=theme.GRAPHITE)
+        frame = RoundedFrame(radius=12, border_width=1.4, background=theme.SURFACE, border=theme.FIELD_BORDER)
         frame.setObjectName("Panel")
         frame.setStyleSheet("QFrame#Panel { background: transparent; border: none; }")
         return frame
@@ -406,18 +414,21 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         shadow.setBlurRadius(blur)
         shadow.setXOffset(0)
         shadow.setYOffset(y_offset)
-        shadow.setColor(QColor(20, 22, 30, alpha))
+        base = QColor(theme.SHADOW)
+        base.setAlpha(int(alpha))
+        shadow.setColor(base)
         widget.setGraphicsEffect(shadow)
 
     def _field_box(self, icon_kind, line_edit, trailing_widget=None):
-        frame = RoundedFrame(radius=8, border_width=1.4, background=theme.SURFACE, border=theme.GRAPHITE)
+        # FIELD_FILL sits off CANVAS so URL / 저장폴더 read as input wells.
+        frame = RoundedFrame(radius=8, border_width=1.4, background=theme.FIELD_FILL, border=theme.FIELD_BORDER)
         frame.setObjectName("FieldBox")
         frame.setStyleSheet("QFrame#FieldBox { background: transparent; border: none; }")
         frame.setFixedHeight(TOP_FIELD_HEIGHT)
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(12, 0, 6 if trailing_widget else 12, 0)
         layout.setSpacing(10)
-        icon = LucideIconWidget(icon_kind)
+        icon = LucideIconWidget(icon_kind)  # color follows live theme.ICON
         line_edit.setObjectName("BareInput")
         layout.addWidget(icon)
         layout.addWidget(line_edit, 1)
@@ -426,7 +437,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         return frame
 
     def _time_field_box(self, line_edit, height=TOP_FIELD_HEIGHT):
-        frame = RoundedFrame(radius=9, border_width=1.4, background=theme.SURFACE_SOFT, border=theme.GRAPHITE)
+        frame = RoundedFrame(radius=9, border_width=1.4, background=theme.FIELD_FILL, border=theme.FIELD_BORDER)
         frame.setObjectName("FieldBox")
         frame.setProperty("timeField", "true")
         frame.setStyleSheet("QFrame#FieldBox { background: transparent; border: none; }")
@@ -454,7 +465,10 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         return row_widget, label
 
     def _build_input_panel(self):
-        panel = self._panel()
+        # Borderless top block for UI experiments (URL + options sit inside).
+        panel = RoundedFrame(radius=12, border_width=0, background=theme.SURFACE, border=theme.FIELD_BORDER)
+        panel.setObjectName("Panel")
+        panel.setStyleSheet("QFrame#Panel { background: transparent; border: none; }")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
@@ -605,7 +619,7 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
         self.search_input.setObjectName("SearchInput")
         self.search_input.setPlaceholderText("제목 검색")
         self.search_input.setObjectName("BareInput")
-        self.search_input_frame = RoundedFrame(radius=8, border_width=1.4, background=theme.SURFACE, border=theme.GRAPHITE)
+        self.search_input_frame = RoundedFrame(radius=8, border_width=1.4, background=theme.FIELD_FILL, border=theme.FIELD_BORDER)
         self.search_input_frame.setFixedHeight(LIST_TOOL_HEIGHT)
         self.search_input_frame.setMaximumWidth(0)
         self.search_input_frame.hide()
@@ -696,26 +710,105 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     def _build_footer(self):
         footer = QWidget()
         outer = QVBoxLayout(footer)
-        outer.setContentsMargins(4, 0, 4, 0)
-        outer.setSpacing(9)
+        outer.setContentsMargins(2, 6, 2, 2)
+        outer.setSpacing(6)
         divider = QFrame()
         divider.setObjectName("FooterDivider")
         outer.addWidget(divider)
 
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
-        self.status_label = QLabel("준비됨")
+        layout.setSpacing(8)
+        # Theme toggle (left): moon in light mode, sun in dark mode.
+        self.theme_toggle_button = LucideIconButton(
+            "moon" if self._theme_mode != "dark" else "sun",
+            size=30,
+            icon_size=16,
+            pointer_cursor=True,
+        )
+        self.theme_toggle_button.setToolTip("다크 모드" if self._theme_mode != "dark" else "라이트 모드")
+        self.theme_toggle_button.clicked.connect(self._toggle_theme_mode)
+        # Keep a hidden status sink so existing _set_status callers stay safe.
+        self.status_label = QLabel("")
+        self.status_label.hide()
         self.total_label = QLabel("총 항목: 0")
         self.concurrent_label = QLabel("동시 다운로드: 0/1")
         self.total_label.setObjectName("MetaText")
         self.concurrent_label.setObjectName("MetaText")
         apply_tracking(self.total_label, 0.2)
         apply_tracking(self.concurrent_label, 0.2)
-        layout.addWidget(self.status_label)
+        layout.addWidget(self.theme_toggle_button, 0, Qt.AlignVCenter)
         layout.addStretch(1)
-        layout.addWidget(self.total_label)
+        layout.addWidget(self.total_label, 0, Qt.AlignVCenter)
         outer.addLayout(layout)
         return footer
+
+    def _toggle_theme_mode(self):
+        next_mode = "light" if getattr(self, "_theme_mode", "light") == "dark" else "dark"
+        self._apply_theme_mode(next_mode, persist=True)
+
+    def _apply_theme_mode(self, mode, persist=True):
+        mode = apply_theme_mode(mode)
+        self._theme_mode = mode
+        if persist and hasattr(self, "settings"):
+            self.settings.setValue(THEME_MODE_SETTING, mode)
+            self.settings.sync()
+        self.setStyleSheet(theme.APP_STYLE)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(theme.APP_STYLE)
+        # Refresh painted widgets that cache colors at construction time.
+        for frame in self.findChildren(RoundedFrame):
+            name = frame.objectName() or ""
+            if name == "FieldBox":
+                frame.set_colors(background=theme.FIELD_FILL, border=theme.FIELD_BORDER)
+            elif name == "Panel":
+                frame.set_colors(background=theme.SURFACE, border=theme.FIELD_BORDER)
+            else:
+                # Search + other outlined chrome = same well as fields/buttons.
+                frame.set_colors(background=theme.FIELD_FILL, border=theme.FIELD_BORDER)
+        for icon in self.findChildren(LucideIconWidget):
+            # Keep empty-state glyph muted; meta/row icons follow live theme.
+            if icon.icon_name == "play" and icon.icon_size >= 36:
+                icon.set_color(theme.BORDER_STRONG)
+            else:
+                # None = resolve theme.ICON on each paint (avoids frozen light-mode black).
+                icon.set_color(None)
+        for button in self.findChildren(LucideIconButton):
+            button.update()
+        # Cookie combo + source favicons paint with live theme tokens on next update.
+        for combo in self.findChildren(CleanComboBox):
+            combo.update()
+        try:
+            from tools.clipflow_widgets import SourceLinkButton
+        except ImportError:
+            from clipflow_widgets import SourceLinkButton
+        for source in self.findChildren(SourceLinkButton):
+            # Favicons are theme-independent (remote/youtube/globe) — repaint only.
+            source.update()
+        self._refresh_theme_toggle_icon()
+        if hasattr(self, "primary_button"):
+            download_icon = QIcon()
+            download_icon.addPixmap(lucide_pixmap("download", 18, theme.ON_ACCENT), QIcon.Normal)
+            download_icon.addPixmap(lucide_pixmap("download", 18, theme.MUTED), QIcon.Disabled)
+            self.primary_button.setIcon(download_icon)
+        if hasattr(self, "_refresh_select_toggle_icon"):
+            self._refresh_select_toggle_icon()
+        if hasattr(self, "_render_rows"):
+            self._render_rows()
+        toast = getattr(self, "update_toast", None)
+        if toast is not None:
+            toast.update()
+            toast.adjustSize()
+
+    def _refresh_theme_toggle_icon(self):
+        button = getattr(self, "theme_toggle_button", None)
+        if button is None:
+            return
+        dark = getattr(self, "_theme_mode", "light") == "dark"
+        button.icon_name = "sun" if dark else "moon"
+        button.setToolTip("라이트 모드" if dark else "다크 모드")
+        button.update()
 
     def _prepare_url_edit(self):
         return
@@ -1005,12 +1098,12 @@ class ClipFlowWindow(SettingsMixin, RenderMixin, ActionMixin, PlaylistMixin, Dow
     def _create_clip_range_popup(self):
         popup = ComboPopup(self.clip_range_button)
         popup.setStyleSheet(
-            f"QLabel#ClipRangeLabel {{ color: {theme.GRAPHITE}; font-size: 16px; font-weight: 700; }}"
+            f"QLabel#ClipRangeLabel {{ color: {theme.INK}; font-size: 16px; font-weight: 700; }}"
             f"QPushButton#SecondaryButton {{"
-            f" background: {theme.SURFACE}; color: {theme.INK}; border: 1px solid {theme.GRAPHITE};"
+            f" background: {theme.FIELD_FILL}; color: {theme.INK}; border: 1px solid {theme.FIELD_BORDER};"
             " border-radius: 8px; padding: 7px 12px; font-size: 13px; font-weight: 600;"
             f"}}"
-            f"QPushButton#SecondaryButton:hover {{ background: {theme.SURFACE_SOFT}; border-color: {theme.GRAPHITE}; }}"
+            f"QPushButton#SecondaryButton:hover {{ background: {theme.FIELD_FILL_HOVER}; border-color: {theme.FIELD_BORDER_HOVER}; }}"
         )
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(10, 10, 10, 10)

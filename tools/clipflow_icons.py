@@ -13,27 +13,32 @@ except ImportError:
 
 
 LUCIDE_ICON_DIR = Path(__file__).resolve().parents[1] / "assets" / "icons" / "lucide"
-ICON_COLOR = theme.ICON
-ICON_HOVER_COLOR = theme.ICON_HOVER
-ICON_ACTIVE_COLOR = theme.ICON_ACTIVE
-ICON_DISABLED_COLOR = theme.ICON_DISABLED
-ICON_DANGER_COLOR = theme.DANGER
-ICON_DANGER_HOVER_COLOR = theme.DANGER_HOVER
-ICON_DANGER_ACTIVE_COLOR = theme.DANGER_PRESSED
+
+
+def _live_icon_color():
+    """Resolve at call time — never freeze light-mode black in default args."""
+    return theme.ICON
 
 
 def icon_path(name):
     return LUCIDE_ICON_DIR / f"{name}.svg"
 
 
-def lucide_svg(name, color=ICON_COLOR):
+def lucide_svg(name, color=None):
     path = icon_path(name)
     data = path.read_text(encoding="utf-8")
-    return data.replace("currentColor", color)
+    return data.replace("currentColor", color if color is not None else _live_icon_color())
+
+
+def lucide_pixmap(name, size=20, color=None, scale=4):
+    # Resolve None → live theme.ICON *before* caching so theme switches never
+    # reuse a light-mode black pixmap under the color=None key.
+    resolved = color if color is not None else _live_icon_color()
+    return _lucide_pixmap_cached(name, int(size), str(resolved), int(scale))
 
 
 @lru_cache(maxsize=256)
-def lucide_pixmap(name, size=20, color=ICON_COLOR, scale=4):
+def _lucide_pixmap_cached(name, size, color, scale):
     renderer = QSvgRenderer(lucide_svg(name, color).encode("utf-8"))
     pixel_size = int(size * scale)
     pixmap = QPixmap(pixel_size, pixel_size)
@@ -46,11 +51,27 @@ def lucide_pixmap(name, size=20, color=ICON_COLOR, scale=4):
     return pixmap
 
 
+# Back-compat: theme.apply_theme_mode may call lucide_pixmap.cache_clear().
+lucide_pixmap.cache_clear = _lucide_pixmap_cached.cache_clear
+lucide_pixmap.cache_info = _lucide_pixmap_cached.cache_info
+
+
+# Back-compat aliases updated by theme.apply_theme_mode → _sync_icon_module_colors.
+ICON_COLOR = theme.ICON
+ICON_HOVER_COLOR = theme.ICON_HOVER
+ICON_ACTIVE_COLOR = theme.ICON_ACTIVE
+ICON_DISABLED_COLOR = theme.ICON_DISABLED
+ICON_DANGER_COLOR = theme.DANGER
+ICON_DANGER_HOVER_COLOR = theme.DANGER_HOVER
+ICON_DANGER_ACTIVE_COLOR = theme.DANGER_PRESSED
+
+
 class LucideIconWidget(QWidget):
-    def __init__(self, icon_name, size=22, color=ICON_COLOR, parent=None):
+    def __init__(self, icon_name, size=22, color=None, parent=None):
         super().__init__(parent)
         self.icon_name = icon_name
         self.icon_size = size
+        # None = follow live theme.ICON on every paint (dark/light safe).
         self.color = color
         self.setFixedSize(size, size)
         self.setCursor(Qt.ArrowCursor)
@@ -64,7 +85,8 @@ class LucideIconWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        painter.drawPixmap(0, 0, self.icon_size, self.icon_size, lucide_pixmap(self.icon_name, self.icon_size, self.color))
+        color = self.color if self.color is not None else _live_icon_color()
+        painter.drawPixmap(0, 0, self.icon_size, self.icon_size, lucide_pixmap(self.icon_name, self.icon_size, color))
 
 
 class LucideIconButton(QToolButton):
@@ -99,20 +121,20 @@ class LucideIconButton(QToolButton):
 
     def _icon_color(self):
         if not self.isEnabled():
-            return ICON_DISABLED_COLOR
+            return theme.ICON_DISABLED
         if self.danger and self.isDown():
-            return ICON_DANGER_ACTIVE_COLOR
+            return theme.DANGER_PRESSED
         if self.danger and self.underMouse():
-            return ICON_DANGER_HOVER_COLOR
+            return theme.DANGER_HOVER
         if self.danger:
-            return ICON_DANGER_COLOR
+            return theme.DANGER
         if self.icon_color:
             return self.icon_color
         if self.isDown():
-            return ICON_ACTIVE_COLOR
+            return theme.ICON_ACTIVE
         if self.underMouse():
-            return ICON_HOVER_COLOR
-        return ICON_COLOR
+            return theme.ICON_HOVER
+        return theme.ICON
 
     def paintEvent(self, event):
         del event
@@ -121,11 +143,10 @@ class LucideIconButton(QToolButton):
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
         if self.bordered:
-            # Persistent bordered box so this reads as the same control family
-            # as the adjacent combo box / secondary button.
+            # Same well + outline as CleanComboBox / SecondaryButton / FieldBox.
             hovered = self.underMouse() and self.isEnabled()
-            border = theme.GRAPHITE
-            background = theme.SURFACE_SOFT if hovered else theme.SURFACE
+            border = theme.FIELD_BORDER_HOVER if hovered else theme.FIELD_BORDER
+            background = theme.FIELD_FILL_HOVER if hovered else theme.FIELD_FILL
             painter.setPen(QPen(QColor(border), 1.4))
             painter.setBrush(QColor(background))
             painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.7, 0.7, -0.7, -0.7), 8, 8)
@@ -189,7 +210,7 @@ class CustomTooltip(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setStyleSheet(
             "QLabel#CustomTooltipBubble {"
-            f" background: {theme.SURFACE}; color: {theme.INK}; border: 1px solid {theme.BORDER_STRONG};"
+            f" background: {theme.SURFACE}; color: {theme.INK}; border: 1px solid {theme.FIELD_BORDER};"
             " border-radius: 7px; padding: 7px 10px; font-size: 12px; font-weight: 500;"
             " }"
         )

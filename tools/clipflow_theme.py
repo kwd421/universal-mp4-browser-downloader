@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt
@@ -24,57 +25,175 @@ FONT_FALLBACKS = ["Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", "Helve
 _FONT_CONFIGURED = False
 
 # ---------------------------------------------------------------------------
-# Palette — clean light "product" surface (Vercel lineage): a near-white canvas,
-# crisp white cards, hairline gray borders, near-black ink, a BLACK primary
-# action, and a single blue used only for focus / progress / links. Flat, no
-# gradients, minimal shadow. Single source of truth for every module.
+# Palette — light by default; dark is a softer low-glare variant.
+# apply_theme_mode("light"|"dark") swaps tokens and rebuilds APP_STYLE.
 # ---------------------------------------------------------------------------
-CANVAS = "#FAFAFA"
-SURFACE = "#FFFFFF"
-SURFACE_SOFT = "#F4F4F5"
-SURFACE_RAISED = "#FFFFFF"
-SURFACE_SUNKEN = "#FFFFFF"
-BORDER = "#EAEAEA"
-BORDER_STRONG = "#D4D4D8"
+THEME_MODE = "light"
 
-INK = "#171717"
-INK_SOFT = "#3F3F46"
-MUTED = "#71717A"
-MUTED_SOFT = "#A1A1AA"
+# Named swatches — hex only lives here (and palette dicts below).
+# Neutral steps follow a soft AAA-friendly scale (no pure black/white body chrome):
+#   light: FAFAFA…171717 · dark: 171717…F5F5F5  (see webs.tistory.com/182)
+#
+# Surface hierarchy (same roles in light + dark — never melt controls into page):
+#   CANVAS       — window page background
+#   SURFACE      — cards / panels / rows (one step above canvas)
+#   FIELD_FILL   — inputs, secondary buttons, combos (control chrome wells)
+#   FIELD_BORDER — outlines for that control chrome
+#   BORDER       — soft list/card hairlines only
+#   GRAPHITE     — solid fills / icon ink (not control outlines)
+# Soft white scale (AAA-friendly neutrals) — no pure-#FFF page, no beige.
+# Steps: canvas 100 → surface 50 → raised base; ink 800 not pure black.
+SOFT_WHITE_50 = "#FAFAFA"
+SOFT_WHITE_100 = "#F5F5F5"
+SOFT_WHITE_200 = "#E5E5E5"
+SOFT_WHITE_300 = "#D4D4D4"
+SOFT_WHITE_BASE = "#FFFFFF"
+PURE_WHITE = "#FFFFFF"
+PURE_BLACK = "#000000"
+# Site favicon chrome is theme-independent (never flips black↔white with mode).
+FAVICON_GLOBE = "#737373"
+YOUTUBE_PLAY = PURE_WHITE
 
-# Primary action = solid black (Vercel signature). Names kept for low churn.
-GRAPHITE = "#171717"
-GRAPHITE_HOVER = "#000000"
-GRAPHITE_PRESSED = "#2A2A2A"
-GRAPHITE_DISABLED = "#F4F4F5"
-ON_ACCENT = "#FFFFFF"
-FIELD_BORDER = GRAPHITE
-FIELD_BORDER_HOVER = GRAPHITE
+LIGHT_PALETTE = {
+    # Soft gray-white page; cards/controls one step lighter (less glare than chalk UI).
+    "CANVAS": SOFT_WHITE_100,
+    "SURFACE": SOFT_WHITE_50,
+    "SURFACE_SOFT": SOFT_WHITE_200,
+    "SURFACE_RAISED": SOFT_WHITE_BASE,
+    "SURFACE_SUNKEN": SOFT_WHITE_200,
+    "BORDER": SOFT_WHITE_200,
+    "BORDER_STRONG": SOFT_WHITE_300,
+    "INK": "#262626",
+    "INK_SOFT": "#404040",
+    "MUTED": "#737373",
+    "MUTED_SOFT": "#A3A3A3",
+    "GRAPHITE": "#404040",
+    "GRAPHITE_HOVER": "#262626",
+    "GRAPHITE_PRESSED": "#171717",
+    "GRAPHITE_DISABLED": SOFT_WHITE_200,
+    "ON_ACCENT": PURE_WHITE,
+    # Control wells: clean base white on soft canvas; outline near-black.
+    "FIELD_FILL": SOFT_WHITE_BASE,
+    "FIELD_FILL_HOVER": SOFT_WHITE_50,
+    "FIELD_BORDER": "#171717",
+    "FIELD_BORDER_HOVER": "#262626",
+    "ACCENT": "#0070F3",
+    "ACCENT_HOVER": "#0761D1",
+    "ACCENT_PRESSED": "#0655BB",
+    "ACCENT_TINT": "#E8F1FE",
+    "ACCENT_TINT_STRONG": "#D3E4FD",
+    "ACCENT_SOFT": "#3B9EFF",
+    "SUCCESS": "#0F7B3F",
+    "SUCCESS_TINT": "#E6F4EA",
+    "SUCCESS_BORDER": "#9CD3B0",
+    "SUCCESS_BORDER_STRONG": "#6FBF8E",
+    "DANGER": "#E5484D",
+    "DANGER_HOVER": "#CF3035",
+    "DANGER_PRESSED": "#B91C1C",
+    "DANGER_TINT": "#FDECED",
+    "DANGER_TINT_STRONG": "#FBD5D7",
+    "YOUTUBE_RED": "#FF0000",
+    "SHADOW": "#14161E",
+    "ICON_DISABLED": "#C4C4CC",
+}
 
-# Blue is an information accent only (focus ring, progress, links, selection).
-ACCENT = "#0070F3"
-ACCENT_HOVER = "#0761D1"
-ACCENT_PRESSED = "#0655BB"
-ACCENT_TINT = "#E8F1FE"
-ACCENT_TINT_STRONG = "#D3E4FD"
-ACCENT_SOFT = "#3B9EFF"
+# Dark: same hierarchy as light — page / card / control well clearly stepped.
+# Hover steps are intentionally large so focus/hover reads at a glance.
+DARK_PALETTE = {
+    "CANVAS": "#121212",
+    "SURFACE": "#1C1C1C",
+    "SURFACE_SOFT": "#3A3A3A",
+    "SURFACE_RAISED": "#222222",
+    "SURFACE_SUNKEN": "#0E0E0E",
+    "BORDER": "#333333",
+    "BORDER_STRONG": "#5A5A5A",
+    "INK": "#E8E8E8",
+    "INK_SOFT": "#D4D4D4",
+    "MUTED": "#A3A3A3",
+    "MUTED_SOFT": "#8A8A8A",
+    "GRAPHITE": "#D4D4D4",
+    "GRAPHITE_HOVER": "#FFFFFF",
+    "GRAPHITE_PRESSED": "#F5F5F5",
+    "GRAPHITE_DISABLED": "#333333",
+    "ON_ACCENT": "#121212",
+    # Control wells sit above canvas + cards; hover jumps a clear step brighter.
+    "FIELD_FILL": "#2C2C2C",
+    "FIELD_FILL_HOVER": "#484848",
+    "FIELD_BORDER": "#C4C4C4",
+    "FIELD_BORDER_HOVER": "#FFFFFF",
+    "ACCENT": "#4B9BFF",
+    "ACCENT_HOVER": "#7ABCFF",
+    "ACCENT_PRESSED": "#3A8AEB",
+    "ACCENT_TINT": "#1A2C44",
+    "ACCENT_TINT_STRONG": "#2A4570",
+    "ACCENT_SOFT": "#7ABCFF",
+    "SUCCESS": "#4ADE80",
+    "SUCCESS_TINT": "#14261A",
+    "SUCCESS_BORDER": "#2A5A3C",
+    "SUCCESS_BORDER_STRONG": "#357A4E",
+    "DANGER": "#F07178",
+    "DANGER_HOVER": "#F28B90",
+    "DANGER_PRESSED": "#E0555C",
+    "DANGER_TINT": "#2A1618",
+    "DANGER_TINT_STRONG": "#3A1C20",
+    "YOUTUBE_RED": "#FF0000",
+    "SHADOW": PURE_BLACK,
+    "ICON_DISABLED": "#525252",
+}
 
-SUCCESS = "#0F7B3F"
-SUCCESS_TINT = "#E6F4EA"
-SUCCESS_BORDER = "#9CD3B0"
-SUCCESS_BORDER_STRONG = "#6FBF8E"
-DANGER = "#E5484D"
-DANGER_HOVER = "#CF3035"
-DANGER_PRESSED = "#B91C1C"
-DANGER_TINT = "#FDECED"
-DANGER_TINT_STRONG = "#FBD5D7"
+PROGRESS_RAINBOW = (
+    "#2F80ED",
+    "#9B51E0",
+    "#EB5757",
+    "#F2C94C",
+    "#27AE60",
+)
 
+CANVAS = LIGHT_PALETTE["CANVAS"]
+SURFACE = LIGHT_PALETTE["SURFACE"]
+SURFACE_SOFT = LIGHT_PALETTE["SURFACE_SOFT"]
+SURFACE_RAISED = LIGHT_PALETTE["SURFACE_RAISED"]
+SURFACE_SUNKEN = LIGHT_PALETTE["SURFACE_SUNKEN"]
+BORDER = LIGHT_PALETTE["BORDER"]
+BORDER_STRONG = LIGHT_PALETTE["BORDER_STRONG"]
+INK = LIGHT_PALETTE["INK"]
+INK_SOFT = LIGHT_PALETTE["INK_SOFT"]
+MUTED = LIGHT_PALETTE["MUTED"]
+MUTED_SOFT = LIGHT_PALETTE["MUTED_SOFT"]
+GRAPHITE = LIGHT_PALETTE["GRAPHITE"]
+GRAPHITE_HOVER = LIGHT_PALETTE["GRAPHITE_HOVER"]
+GRAPHITE_PRESSED = LIGHT_PALETTE["GRAPHITE_PRESSED"]
+GRAPHITE_DISABLED = LIGHT_PALETTE["GRAPHITE_DISABLED"]
+ON_ACCENT = LIGHT_PALETTE["ON_ACCENT"]
+FIELD_FILL = LIGHT_PALETTE["FIELD_FILL"]
+FIELD_FILL_HOVER = LIGHT_PALETTE["FIELD_FILL_HOVER"]
+FIELD_BORDER = LIGHT_PALETTE["FIELD_BORDER"]
+FIELD_BORDER_HOVER = LIGHT_PALETTE["FIELD_BORDER_HOVER"]
+ACCENT = LIGHT_PALETTE["ACCENT"]
+ACCENT_HOVER = LIGHT_PALETTE["ACCENT_HOVER"]
+ACCENT_PRESSED = LIGHT_PALETTE["ACCENT_PRESSED"]
+ACCENT_TINT = LIGHT_PALETTE["ACCENT_TINT"]
+ACCENT_TINT_STRONG = LIGHT_PALETTE["ACCENT_TINT_STRONG"]
+ACCENT_SOFT = LIGHT_PALETTE["ACCENT_SOFT"]
+SUCCESS = LIGHT_PALETTE["SUCCESS"]
+SUCCESS_TINT = LIGHT_PALETTE["SUCCESS_TINT"]
+SUCCESS_BORDER = LIGHT_PALETTE["SUCCESS_BORDER"]
+SUCCESS_BORDER_STRONG = LIGHT_PALETTE["SUCCESS_BORDER_STRONG"]
+DANGER = LIGHT_PALETTE["DANGER"]
+DANGER_HOVER = LIGHT_PALETTE["DANGER_HOVER"]
+DANGER_PRESSED = LIGHT_PALETTE["DANGER_PRESSED"]
+DANGER_TINT = LIGHT_PALETTE["DANGER_TINT"]
+DANGER_TINT_STRONG = LIGHT_PALETTE["DANGER_TINT_STRONG"]
+YOUTUBE_RED = LIGHT_PALETTE["YOUTUBE_RED"]
+SHADOW = LIGHT_PALETTE["SHADOW"]
 ICON = GRAPHITE
 ICON_HOVER = GRAPHITE
 ICON_ACTIVE = ACCENT
-ICON_DISABLED = "#C4C4CC"
+ICON_DISABLED = LIGHT_PALETTE["ICON_DISABLED"]
 
-APP_STYLE = f"""
+
+def _compose_app_style():
+    return f"""
 QMainWindow {{
     background: {CANVAS};
     font-family: "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", "Helvetica Neue", "Segoe UI";
@@ -84,7 +203,7 @@ QDialog {{
 }}
 QFrame#Panel {{
     background: {SURFACE};
-    border: 1px solid {GRAPHITE};
+    border: 1px solid {FIELD_BORDER};
     border-radius: 12px;
 }}
 QFrame#ListPanel {{
@@ -92,15 +211,16 @@ QFrame#ListPanel {{
     border: none;
 }}
 QFrame#FieldBox {{
-    background: {SURFACE};
+    background: {FIELD_FILL};
     border: 1px solid {FIELD_BORDER};
     border-radius: 8px;
 }}
 QFrame#FieldBox:hover {{
+    background: {FIELD_FILL_HOVER};
     border-color: {FIELD_BORDER_HOVER};
 }}
 QFrame#FieldBox[focused="true"] {{
-    background: {SURFACE};
+    background: {FIELD_FILL};
     border-color: {ACCENT};
 }}
 QFrame#DownloadRow {{
@@ -152,7 +272,7 @@ QFrame#FooterDivider {{
     min-height: 1px;
 }}
 QFrame#InputDivider {{
-    background: {GRAPHITE};
+    background: {FIELD_BORDER};
     border: none;
     max-height: 1px;
     min-height: 1px;
@@ -171,13 +291,14 @@ QToolButton#SourceLinkButton:hover {{
 }}
 QToolButton#HelpButton {{
     background: {SURFACE};
-    border: 1px solid {BORDER_STRONG};
+    border: 1px solid {FIELD_BORDER};
     border-radius: 21px;
     color: {INK};
     font-weight: 700;
 }}
 QToolButton#HelpButton:hover {{
     background: {SURFACE_SOFT};
+    border-color: {FIELD_BORDER_HOVER};
 }}
 QToolButton#ActionButton {{
     color: {INK_SOFT};
@@ -186,18 +307,19 @@ QToolButton#ActionButton {{
 QPushButton#FloatingButton {{
     background: {SURFACE};
     color: {INK};
-    border: 1px solid {BORDER_STRONG};
+    border: 1px solid {FIELD_BORDER};
     border-radius: 14px;
     padding: 5px 12px;
     font-weight: 600;
 }}
 QPushButton#FloatingButton:hover {{
     background: {SURFACE_SOFT};
+    border-color: {FIELD_BORDER_HOVER};
 }}
 QFrame#UpdateToast {{
     background: {SURFACE};
     color: {INK};
-    border: 1px solid {BORDER_STRONG};
+    border: 1px solid {FIELD_BORDER};
     border-radius: 12px;
 }}
 QLabel#UpdateToastMessage {{
@@ -234,7 +356,7 @@ QLabel#UpdateNotesTitle {{
 QTextBrowser#UpdateNotesBody {{
     background: {SURFACE};
     color: {INK};
-    border: 1px solid {BORDER};
+    border: 1px solid {FIELD_BORDER};
     border-radius: 10px;
     padding: 12px 14px;
     font-size: 14px;
@@ -315,7 +437,7 @@ QComboBox#CompactComboBox {{
 QComboBox QAbstractItemView {{
     background: {SURFACE};
     color: {INK};
-    border: 1px solid {BORDER_STRONG};
+    border: 1px solid {FIELD_BORDER};
     border-radius: 8px;
     padding: 4px;
     outline: none;
@@ -324,7 +446,7 @@ QComboBox QAbstractItemView {{
 }}
 QMenu {{
     background: {SURFACE};
-    border: 1px solid {BORDER};
+    border: 1px solid {FIELD_BORDER};
     border-radius: 10px;
     padding: 4px;
 }}
@@ -348,7 +470,7 @@ QMenu::separator {{
 }}
 QFrame#ComboPopup {{
     background: {SURFACE};
-    border: 1px solid {GRAPHITE};
+    border: 1px solid {FIELD_BORDER};
     border-radius: 10px;
 }}
 QPushButton#ComboOption {{
@@ -405,10 +527,10 @@ QPushButton:pressed {{
 QPushButton:disabled {{
     background: {GRAPHITE_DISABLED};
     color: {MUTED_SOFT};
-    border: 1px solid {GRAPHITE};
+    border: 1px solid {FIELD_BORDER};
 }}
 QPushButton#SecondaryButton {{
-    background: {SURFACE};
+    background: {FIELD_FILL};
     color: {INK};
     border: 1px solid {FIELD_BORDER};
     font-size: 13px;
@@ -427,8 +549,8 @@ QPushButton#DangerButton:pressed {{
     background: {DANGER_PRESSED};
 }}
 QPushButton#SecondaryButton:hover {{
-    background: {SURFACE_SOFT};
-    border-color: {GRAPHITE};
+    background: {FIELD_FILL_HOVER};
+    border-color: {FIELD_BORDER_HOVER};
 }}
 QPushButton#IconButton {{
     background: transparent;
@@ -488,7 +610,7 @@ QToolButton:disabled {{
 QToolTip {{
     background: {SURFACE};
     color: {INK};
-    border: 1px solid {GRAPHITE};
+    border: 1px solid {FIELD_BORDER};
     border-radius: 7px;
     padding: 7px 10px;
     font-size: 12px;
@@ -559,14 +681,61 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
 }}
 """
 
-STATUS_STYLES = {
-    "준비": f"background: {SURFACE_SOFT}; color: {MUTED};",
-    "대기": f"background: {SURFACE_SOFT}; color: {MUTED};",
-    "분석 중": f"background: {ACCENT_TINT}; color: {ACCENT_PRESSED};",
-    "다운로드 중": f"background: {ACCENT_TINT}; color: {ACCENT_PRESSED};",
-    "완료": f"background: {SUCCESS_TINT}; color: {SUCCESS};",
-    "오류": f"background: {DANGER_TINT}; color: {DANGER};",
-}
+
+def _compose_status_styles():
+    return {
+        "준비": f"background: {SURFACE_SOFT}; color: {MUTED};",
+        "대기": f"background: {SURFACE_SOFT}; color: {MUTED};",
+        "분석 중": f"background: {ACCENT_TINT}; color: {ACCENT_PRESSED};",
+        "다운로드 중": f"background: {ACCENT_TINT}; color: {ACCENT_PRESSED};",
+        "완료": f"background: {SUCCESS_TINT}; color: {SUCCESS};",
+        "오류": f"background: {DANGER_TINT}; color: {DANGER};",
+    }
+
+
+def _sync_icon_module_colors():
+    # Avoid circular import during module init; safe once icons is loaded.
+    icons = sys.modules.get("tools.clipflow_icons") or sys.modules.get("clipflow_icons")
+    if icons is None:
+        return
+    if not hasattr(icons, "lucide_pixmap"):
+        return
+    icons.ICON_COLOR = ICON
+    icons.ICON_HOVER_COLOR = ICON_HOVER
+    icons.ICON_ACTIVE_COLOR = ICON_ACTIVE
+    icons.ICON_DISABLED_COLOR = ICON_DISABLED
+    icons.ICON_DANGER_COLOR = DANGER
+    icons.ICON_DANGER_HOVER_COLOR = DANGER_HOVER
+    icons.ICON_DANGER_ACTIVE_COLOR = DANGER_PRESSED
+    cache_clear = getattr(icons.lucide_pixmap, "cache_clear", None)
+    if callable(cache_clear):
+        cache_clear()
+
+
+def apply_theme_mode(mode="light"):
+    """Apply light/dark palette tokens and rebuild stylesheets."""
+    global THEME_MODE, APP_STYLE, STATUS_STYLES
+    global ICON, ICON_HOVER, ICON_ACTIVE, ICON_DISABLED
+    mode = "dark" if str(mode or "").strip().lower() == "dark" else "light"
+    THEME_MODE = mode
+    palette = DARK_PALETTE if mode == "dark" else LIGHT_PALETTE
+    g = globals()
+    for key, value in palette.items():
+        g[key] = value
+    # Icons track graphite (soft off-black / off-white) — never pure #000/#FFF body chrome.
+    ICON = GRAPHITE
+    ICON_HOVER = GRAPHITE_HOVER
+    ICON_ACTIVE = ACCENT
+    ICON_DISABLED = palette["ICON_DISABLED"]
+    APP_STYLE = _compose_app_style()
+    STATUS_STYLES = _compose_status_styles()
+    _sync_icon_module_colors()
+    return THEME_MODE
+
+
+APP_STYLE = ""
+STATUS_STYLES = {}
+apply_theme_mode("light")
 
 
 def preferred_font_family(default_family=""):
@@ -647,6 +816,7 @@ SORT_DESC_SETTING = "sort_desc"
 WINDOW_SIZE_SETTING = "window_size"
 DOWNLOAD_CONCURRENCY_SETTING = "download_concurrency"
 PERMANENT_DELETE_SETTING = "permanent_delete"
+THEME_MODE_SETTING = "theme_mode"
 
 PREFERENCE_DEFAULTS = {
     "quality": "자동",
