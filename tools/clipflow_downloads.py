@@ -693,7 +693,19 @@ class DownloadMixin:
         row.pop("_pause_cleanup_pending", None)
         self._set_row_paused(row)
         if should_resume and row in self.rows:
-            QTimer.singleShot(0, lambda r=row: self.resume_download_for_row(r))
+            # finished() may run before thread-finished removes the active item;
+            # wait until the row is fully idle before starting a new download.
+            row["_resume_after_pause_cleanup"] = True
+            QTimer.singleShot(0, lambda r=row: self._resume_after_pause_cleanup_when_idle(r))
+
+    def _resume_after_pause_cleanup_when_idle(self, row):
+        if not row or row not in self.rows:
+            return
+        if self._row_is_downloading(row):
+            QTimer.singleShot(100, lambda r=row: self._resume_after_pause_cleanup_when_idle(r))
+            return
+        row.pop("_resume_after_pause_cleanup", None)
+        self.resume_download_for_row(row)
 
     def _cancel_active_download_item(self, item):
         """Request cancel and wait briefly. Returns True if the worker thread has stopped."""
