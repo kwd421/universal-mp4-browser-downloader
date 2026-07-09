@@ -91,6 +91,9 @@ _HISTORY_DROP_KEYS = {
     "_cookie_header",
     "http_headers",
     "headers",
+    "_download_info",
+    "_download_info_key",
+    "_clipflow_row_id",
 }
 
 _HISTORY_URL_KEYS = {

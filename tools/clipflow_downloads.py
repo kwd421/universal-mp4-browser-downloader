@@ -646,22 +646,29 @@ class DownloadMixin:
         if not items:
             return
         row["download_cancel_requested"] = True
-        all_stopped = True
+        pending_items = []
         for item in items:
             if not self._cancel_active_download_item(item):
-                all_stopped = False
-        self.active_downloads = [item for item in self.active_downloads if item.get("row") is not row]
-        if all_stopped:
-            self._set_row_paused(row)
-        else:
-            # Worker may still hold .part handles; delay cleanup until after exit.
+                pending_items.append(item)
+        if pending_items:
+            # Keep live threads in active_downloads so _row_is_downloading / finished
+            # handlers still find this row until the worker actually exits.
+            self.active_downloads = [
+                item
+                for item in self.active_downloads
+                if item.get("row") is not row or item in pending_items
+            ]
+            row["_pause_cleanup_pending"] = True
             row["progress_text"] = row.get("progress_text") or ""
             self._set_row_status(row, PAUSED_STATUS, "일시정지 정리 중")
             widget = row.get("widget")
             if widget:
                 widget.set_progress(row.get("progress") or 0, row.get("progress_text") or "")
                 widget._refresh_actions()
-            QTimer.singleShot(1200, lambda r=row: self._finish_delayed_pause_cleanup(r))
+            QTimer.singleShot(600, lambda r=row: self._finish_delayed_pause_cleanup(r))
+        else:
+            self.active_downloads = [item for item in self.active_downloads if item.get("row") is not row]
+            self._set_row_paused(row)
         self._sync_legacy_download_refs()
         self._refresh_primary_action()
         self._refresh_footer()
@@ -672,9 +679,10 @@ class DownloadMixin:
         if not row or row not in self.rows:
             return
         if self._row_is_downloading(row):
+            QTimer.singleShot(600, lambda r=row: self._finish_delayed_pause_cleanup(r))
             return
-        # Finished-handler may already have paused + cleaned.
-        if row.get("status") == PAUSED_STATUS or row.pop("download_cancel_requested", False):
+        # Thread gone: now safe to wipe partials. finished-handler may already have cleaned.
+        if row.pop("_pause_cleanup_pending", False) or row.pop("download_cancel_requested", False):
             self._set_row_paused(row)
 
     def _cancel_active_download_item(self, item):
@@ -723,6 +731,8 @@ class DownloadMixin:
         row.pop("download_finishing", None)
         row.pop("active_download_candidate", None)
         row.pop("_queued_download_candidate", None)
+        row.pop("_pause_cleanup_pending", None)
+        row.pop("download_cancel_requested", None)
         row["progress_text"] = row.get("progress_text") or ""
         self._set_row_status(row, PAUSED_STATUS, "")
         widget = row.get("widget")
