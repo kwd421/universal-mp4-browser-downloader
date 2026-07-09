@@ -433,20 +433,27 @@ class SettingsMixin:
             return
         updater.schedule_startup_check(self._show_update_available_toast)
 
-    def _show_update_available_toast(self):
+    def _show_update_available_toast(self, info=None):
+        # Session-only dismiss: once closed with ×, don't show again until next launch.
+        if getattr(self, "_update_toast_dismissed_session", False):
+            return
         toast = getattr(self, "update_toast", None)
         if toast is not None and toast.isVisible():
             return
         if toast is None:
             toast = UpdateAvailableBanner(self)
             toast.update_requested.connect(self._open_update_installer)
+            toast.details_requested.connect(self._open_update_details)
             toast.dismissed.connect(self._hide_update_toast)
             self.update_toast = toast
+        if hasattr(toast, "set_update_info"):
+            toast.set_update_info(info)
         self._position_update_toast()
         toast.show()
         toast.raise_()
 
     def _hide_update_toast(self):
+        self._update_toast_dismissed_session = True
         toast = getattr(self, "update_toast", None)
         if toast is not None:
             toast.hide()
@@ -465,6 +472,22 @@ class SettingsMixin:
         updater = self._app_updater()
         if updater is not None:
             updater.check_for_updates()
+
+    def _open_update_details(self):
+        toast = getattr(self, "update_toast", None)
+        info = toast.update_info() if toast is not None and hasattr(toast, "update_info") else {}
+        url = str((info or {}).get("release_notes_url") or "").strip()
+        if not url:
+            return
+        try:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+        except ImportError:
+            import webbrowser
+
+            webbrowser.open(url)
+            return
+        QDesktopServices.openUrl(QUrl(url))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

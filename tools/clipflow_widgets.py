@@ -1097,18 +1097,24 @@ class CleanComboBox(QComboBox):
 
 class UpdateAvailableBanner(QFrame):
     update_requested = Signal()
+    details_requested = Signal()
     dismissed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("UpdateToast")
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
+        self._update_info = {}
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 8, 8)
         layout.setSpacing(8)
         self.message_label = QLabel("새 버전이 있습니다")
         self.message_label.setObjectName("UpdateToastMessage")
         self.message_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        self.details_button = OutlinedButton("상세")
+        self.details_button.setObjectName("SecondaryButton")
+        self.details_button.setCursor(Qt.PointingHandCursor)
+        self.details_button.setVisible(False)
         self.update_button = OutlinedButton("업데이트")
         self.update_button.setObjectName("PrimaryPopupButton")
         self.update_button.setCursor(Qt.PointingHandCursor)
@@ -1117,11 +1123,28 @@ class UpdateAvailableBanner(QFrame):
         self.dismiss_button.setFixedSize(24, 24)
         self.dismiss_button.setCursor(Qt.PointingHandCursor)
         self.dismiss_button.setFlat(True)
+        self.details_button.clicked.connect(self.details_requested.emit)
         self.update_button.clicked.connect(self.update_requested.emit)
         self.dismiss_button.clicked.connect(self._dismiss)
         layout.addWidget(self.message_label, 0)
+        layout.addWidget(self.details_button, 0)
         layout.addWidget(self.update_button, 0)
         layout.addWidget(self.dismiss_button, 0, Qt.AlignVCenter)
+
+    def set_update_info(self, info=None):
+        info = info if isinstance(info, dict) else {}
+        self._update_info = dict(info)
+        version = str(info.get("version") or "").strip()
+        if version:
+            self.message_label.setText(f"{version} 업데이트가 있습니다")
+        else:
+            self.message_label.setText("새 버전이 있습니다")
+        notes = str(info.get("release_notes_url") or "").strip()
+        self.details_button.setVisible(bool(notes))
+        self.adjustSize()
+
+    def update_info(self):
+        return dict(self._update_info)
 
     def _dismiss(self):
         self.hide()

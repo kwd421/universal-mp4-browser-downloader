@@ -276,8 +276,11 @@ class DownloadRowWidget(QFrame):
         self._analysis_ring_timer.setInterval(16)
         self._analysis_ring_timer.timeout.connect(self._advance_analysis_ring)
         self._existing_flash_step = 0
+        self._existing_flash_elapsed = QElapsedTimer()
+        self._existing_flash_duration_ms = 2000
         self._existing_flash_timer = QTimer(self)
-        self._existing_flash_timer.setInterval(250)
+        self._existing_flash_timer.setTimerType(Qt.PreciseTimer)
+        self._existing_flash_timer.setInterval(16)
         self._existing_flash_timer.timeout.connect(self._advance_existing_flash)
         self._build()
         self.refresh()
@@ -773,16 +776,53 @@ class DownloadRowWidget(QFrame):
 
     def flash_existing_output_notice(self):
         self._existing_flash_step = 0
+        self._existing_flash_elapsed.restart()
         self.setProperty("existingFlash", "true")
         self._existing_flash_timer.stop()
         self._existing_flash_timer.start()
         self.update()
 
+    def _existing_flash_t(self):
+        duration = max(1, int(self._existing_flash_duration_ms or 2000))
+        return max(0.0, min(1.0, float(self._existing_flash_elapsed.elapsed()) / duration))
+
+    def _existing_flash_smoothstep(self, edge0, edge1, x):
+        if edge1 <= edge0:
+            return 0.0 if x < edge0 else 1.0
+        t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
+        return t * t * (3.0 - 2.0 * t)
+
+    def _existing_flash_blink_amount(self, t):
+        """Two clear blinks over 0→1. Peak = 1 (flash moment), valley = 0 (original)."""
+        def blink(center, width):
+            half = width * 0.5
+            start = center - half
+            end = center + half
+            if t < start or t > end:
+                return 0.0
+            local = (t - start) / max(0.001, width)
+            # Slightly snappier than pure sine so peaks read as distinct beats.
+            return math.sin(local * math.pi) ** 0.85
+
+        # Shorter humps + wider rest between → easier to count as two blinks.
+        return max(blink(0.26, 0.28), blink(0.72, 0.28))
+
+    def _existing_flash_ring_opacity(self, t):
+        # Black completed ring: fully fade out then restore, twice.
+        removed = self._existing_flash_blink_amount(t)
+        return 1.0 - removed
+
+    def _existing_flash_bg_alpha(self, t):
+        # Same beat as the ring. Stronger wash so the card itself is readable.
+        return 0.14 * self._existing_flash_blink_amount(t)
+
     def _advance_existing_flash(self):
-        self._existing_flash_step += 1
-        if self._existing_flash_step >= 4:
+        if not self._existing_flash_elapsed.isValid() or self._existing_flash_elapsed.elapsed() >= self._existing_flash_duration_ms:
             self._existing_flash_timer.stop()
             self.setProperty("existingFlash", "false")
+            self.update()
+            return
+        self._existing_flash_step += 1
         self.update()
 
     def _analysis_ring_point(self, rect, phase):
@@ -1027,16 +1067,36 @@ class DownloadRowWidget(QFrame):
         analyzing = self.property("analyzing") == "true"
         starting = self.property("starting") == "true"
         finishing = self.property("finishing") == "true"
-        if self.property("progressActive") != "true" and not analyzing and not completed and not errored and not starting and not finishing:
+        flashing = self.property("existingFlash") == "true"
+        if (
+            self.property("progressActive") != "true"
+            and not analyzing
+            and not completed
+            and not errored
+            and not starting
+            and not finishing
+            and not flashing
+        ):
             return
         _rect, full, gradient = self._progress_paths()
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        if self.property("existingFlash") == "true":
-            color = QColor("#FFFFFF" if self._existing_flash_step % 2 == 0 else "#111111")
-            painter.setPen(QPen(color, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        if flashing:
+            t = self._existing_flash_t()
+            # Same beat: bg wash up when ring goes away (easier to see on white cards).
+            bg_alpha = self._existing_flash_bg_alpha(t)
+            if bg_alpha > 0.001:
+                wash = QColor(theme.ACCENT)
+                wash.setAlphaF(bg_alpha)
+                card = QPainterPath()
+                card.addRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10.0, 10.0)
+                painter.fillPath(card, wash)
+            # Black completed ring: fully out → restore, twice.
+            ring = QColor(theme.GRAPHITE)
+            ring.setAlphaF(self._existing_flash_ring_opacity(t))
+            painter.setPen(QPen(ring, 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             painter.drawPath(full)
             return
 

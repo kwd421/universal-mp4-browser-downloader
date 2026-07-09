@@ -14,6 +14,8 @@ from pathlib import Path
 
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 SPARKLE_VERSION_TAG = f"{{{SPARKLE_NS}}}version"
+SPARKLE_SHORT_VERSION_TAG = f"{{{SPARKLE_NS}}}shortVersionString"
+SPARKLE_RELEASE_NOTES_TAG = f"{{{SPARKLE_NS}}}releaseNotesLink"
 
 _MAX_APPCAST_BYTES = 1024 * 1024
 
@@ -111,7 +113,7 @@ def _build_number_int(value):
     return None
 
 
-def _latest_appcast_build_number(feed_url):
+def _latest_appcast_item(feed_url):
     request = urllib.request.Request(feed_url, headers={"User-Agent": "ClipFlow-Updater"})
     with urllib.request.urlopen(request, timeout=15) as response:
         chunks = []
@@ -128,24 +130,57 @@ def _latest_appcast_build_number(feed_url):
     item = root.find("channel/item")
     if item is None:
         return None
-    version = item.find(SPARKLE_VERSION_TAG)
-    if version is None or not version.text:
+    version_el = item.find(SPARKLE_VERSION_TAG)
+    if version_el is None or not version_el.text:
         return None
-    return int(version.text.strip())
+    try:
+        build = int(version_el.text.strip())
+    except ValueError:
+        return None
+    short_el = item.find(SPARKLE_SHORT_VERSION_TAG)
+    short_version = (short_el.text or "").strip() if short_el is not None else ""
+    if not short_version:
+        title_el = item.find("title")
+        short_version = (title_el.text or "").strip() if title_el is not None else ""
+    notes_el = item.find(SPARKLE_RELEASE_NOTES_TAG)
+    if notes_el is None:
+        notes_el = item.find("link")
+    notes_url = (notes_el.text or "").strip() if notes_el is not None else ""
+    return {
+        "build": build,
+        "version": short_version or str(build),
+        "release_notes_url": notes_url,
+    }
+
+
+def _latest_appcast_build_number(feed_url):
+    item = _latest_appcast_item(feed_url)
+    if not item:
+        return None
+    return item.get("build")
+
+
+def fetch_startup_update_info():
+    """Return latest update info dict if newer than current, else None."""
+    current = _build_number_int(updater_build_number())
+    if current is None:
+        return None
+    for feed_url in updater_feed_url_candidates():
+        try:
+            item = _latest_appcast_item(feed_url)
+        except Exception:
+            continue
+        if not item:
+            continue
+        latest = item.get("build")
+        if latest is None or latest <= current:
+            continue
+        return item
+    return None
 
 
 def startup_update_is_available():
-    current = _build_number_int(updater_build_number())
-    if current is None:
-        return False
-    for feed_url in updater_feed_url_candidates():
-        try:
-            latest = _latest_appcast_build_number(feed_url)
-        except Exception:
-            continue
-        if latest is not None and latest > current:
-            return True
-    return False
+    return fetch_startup_update_info() is not None
 
 
 class _MainThreadDispatcher:
@@ -361,8 +396,10 @@ class WinSparkleUpdater:
 
         def worker():
             try:
-                if startup_update_is_available():
-                    _dispatch_to_main_thread(self._on_found)
+                info = fetch_startup_update_info()
+                if info:
+                    callback = self._on_found
+                    _dispatch_to_main_thread(lambda: callback(info) if callable(callback) else None)
             except Exception:
                 pass
 
