@@ -94,11 +94,6 @@ CHZZK_HLS_COMPARABLE_DIRECT_RATIO = 0.60
 CHZZK_HLS_SEGMENTED_VOD_BYTES = 1024 * 1024 * 1024
 CHZZK_HLS_SEGMENTED_VOD_SECONDS = 20 * 60
 CHZZK_HLS_SEGMENTED_VOD_SEGMENTS = 300
-CHZZK_DIRECT_SLOW_FALLBACK_SECONDS = float(_env_int("CLIPFLOW_CHZZK_SLOW_FALLBACK_SEC", 25, 5, 120))
-CHZZK_DIRECT_SLOW_FALLBACK_MIN_BYTES = 64 * 1024 * 1024
-CHZZK_DIRECT_SLOW_FALLBACK_BYTES_PER_SEC = (
-    _env_int("CLIPFLOW_CHZZK_SLOW_FALLBACK_MBPS", 6, 1, 50) * 1024 * 1024
-)
 HLS_SEGMENT_READ_CHUNK = 1024 * 1024
 HLS_PARALLEL_PROGRESS_INTERVAL = 0.25
 HLS_SEGMENT_RETRIES = 3
@@ -137,8 +132,6 @@ class DirectMediaTotalChanged(RuntimeError):
         self.actual_total = actual_total
 
 
-class ChzzkDirectSlowFallback(RuntimeError):
-    pass
 _YOUTUBE_DL_FACTORY = None
 _FFMPEG_PATH_UNSET = object()
 _FFMPEG_PATH = _FFMPEG_PATH_UNSET
@@ -5380,12 +5373,15 @@ def chzzk_pick_hls_probe_segments(segment_urls, max_count=None):
         return [segment_urls[0]]
     if max_count == 2:
         return [segment_urls[0], segment_urls[-1]]
-    indexes = [
-        0,
-        len(segment_urls) // 2,
-        min(len(segment_urls) - 1, max(0, int(len(segment_urls) * 0.85))),
-        len(segment_urls) - 1,
-    ]
+    if max_count == 3:
+        indexes = [0, len(segment_urls) // 2, len(segment_urls) - 1]
+    else:
+        indexes = [
+            0,
+            len(segment_urls) // 2,
+            min(len(segment_urls) - 1, max(0, int(len(segment_urls) * 0.85))),
+            len(segment_urls) - 1,
+        ]
     picked = []
     seen = set()
     for index in indexes:
@@ -5418,24 +5414,14 @@ def chzzk_probe_hls_speed(url, headers, segment_count=None, segment_urls=None):
             return 0.0
         started = time.monotonic()
         downloaded = 0
-        downloaded_lock = threading.Lock()
-
-        def download_segment(segment_url):
-            nonlocal downloaded
+        for segment_url in sample_urls:
             request = urllib.request.Request(segment_url, headers=dict(headers or {}))
             with parallel_http_urlopen(request, timeout=CHZZK_ROUTE_PROBE_TIMEOUT) as response:
-                segment_bytes = 0
                 while True:
                     chunk = response.read(HLS_SEGMENT_READ_CHUNK)
                     if not chunk:
                         break
-                    segment_bytes += len(chunk)
-                with downloaded_lock:
-                    downloaded += segment_bytes
-
-        workers = max(1, min(4, HLS_PARALLEL_WORKERS, len(sample_urls)))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            list(executor.map(download_segment, sample_urls))
+                    downloaded += len(chunk)
         elapsed = time.monotonic() - started
         if downloaded <= 0 or elapsed <= 0:
             return 0.0
@@ -5738,75 +5724,6 @@ def emit_chzzk_hls_route_log(on_event):
     )
 
 
-def chzzk_direct_slow_fallback_enabled(candidate, total):
-    candidate = dict(candidate or {})
-    source = candidate.get("source") or candidate.get("webpage_url") or candidate.get("source_url") or ""
-    if not candidate_looks_chzzk(candidate, source):
-        return False
-    if clip_range_from_candidate(candidate):
-        return False
-    return safe_int(total) >= CHZZK_DIRECT_SLOW_FALLBACK_MIN_BYTES
-
-
-def chzzk_direct_speed_is_slow(downloaded, elapsed, total):
-    total = safe_int(total)
-    downloaded = safe_int(downloaded)
-    try:
-        elapsed = float(elapsed or 0)
-    except (TypeError, ValueError):
-        elapsed = 0.0
-    if total < CHZZK_DIRECT_SLOW_FALLBACK_MIN_BYTES:
-        return False
-    if elapsed < CHZZK_DIRECT_SLOW_FALLBACK_SECONDS:
-        return False
-    if downloaded <= 0:
-        return True
-    return downloaded / elapsed < CHZZK_DIRECT_SLOW_FALLBACK_BYTES_PER_SEC
-
-
-def chzzk_direct_slow_check(total):
-    def slow_check(downloaded, elapsed):
-        if chzzk_direct_speed_is_slow(downloaded, elapsed, total):
-            raise ChzzkDirectSlowFallback("CHZZK direct download is slow enough to try HLS")
-
-    return slow_check
-
-
-def chzzk_download_direct_with_hls_fallback(
-    direct_url,
-    direct_candidate,
-    output_dir,
-    page_url,
-    cookie_source,
-    hls_candidate=None,
-    on_event=None,
-):
-    direct_candidate = dict(direct_candidate or {})
-    direct_url = str(direct_url or direct_candidate.get("url") or "").strip()
-    headers = direct_media_request_headers(direct_candidate)
-    total = resolve_direct_media_total(direct_url, headers, direct_candidate)
-    slow_check = None
-    if chzzk_direct_slow_fallback_enabled(direct_candidate, total):
-        slow_check = chzzk_direct_slow_check(total)
-    try:
-        return download_direct_media(direct_url, direct_candidate, output_dir, on_event=on_event, slow_check=slow_check)
-    except ChzzkDirectSlowFallback:
-        hls_candidate = dict(hls_candidate or {})
-        if not str(hls_candidate.get("url") or "").strip():
-            hls_candidate = chzzk_alternative_hls_candidate(direct_candidate, page_url, cookie_source, on_event=on_event) or {}
-        hls_candidate = candidate_with_request_cookies(hls_candidate, cookie_source)
-        hls_url = str(hls_candidate.get("url") or "").strip()
-        if not hls_url:
-            raise RuntimeError("CHZZK direct download was slow, but HLS fallback URL could not be found.")
-        emit_event(
-            on_event,
-            "log",
-            message="CHZZK direct download is slow; switching to HLS",
-        )
-        emit_chzzk_hls_route_log(on_event)
-        return download_hls_parallel(hls_url, hls_candidate, output_dir, on_event=on_event)
-
-
 def refresh_chzzk_candidate_media(candidate, page_url, cookie_source, on_event=None):
     candidate = dict(candidate or {})
     if is_chzzk_direct_mp4_candidate(candidate, page_url) or is_chzzk_hls_candidate(candidate, page_url):
@@ -5898,40 +5815,17 @@ def download_chzzk_candidate(page_url, candidate, output_dir, cookie_source="없
                 emit_chzzk_hls_route_log(on_event)
                 return download_hls_parallel(hls_url, chosen, output_dir, on_event=on_event)
             direct_url = str(chosen.get("url") or "").strip() or target_url
-            return chzzk_download_direct_with_hls_fallback(
-                direct_url,
-                chosen,
-                output_dir,
-                page_url,
-                cookie_source,
-                hls_candidate=hls_candidate,
-                on_event=on_event,
-            )
+            return download_direct_media(direct_url, chosen, output_dir, on_event=on_event)
         if direct_candidate:
             direct_url = str(direct_candidate.get("url") or "").strip() or target_url
-            return chzzk_download_direct_with_hls_fallback(
-                direct_url,
-                direct_candidate,
-                output_dir,
-                page_url,
-                cookie_source,
-                hls_candidate=hls_candidate,
-                on_event=on_event,
-            )
+            return download_direct_media(direct_url, direct_candidate, output_dir, on_event=on_event)
         if hls_candidate:
             hls_url = str(hls_candidate.get("url") or "").strip() or target_url
             emit_chzzk_hls_route_log(on_event)
             return download_hls_parallel(hls_url, hls_candidate, output_dir, on_event=on_event)
 
     if is_chzzk_direct_mp4_candidate(candidate, page_url):
-        return chzzk_download_direct_with_hls_fallback(
-            target_url,
-            candidate,
-            output_dir,
-            page_url,
-            cookie_source,
-            on_event=on_event,
-        )
+        return download_direct_media(target_url, candidate, output_dir, on_event=on_event)
     emit_chzzk_hls_route_log(on_event)
     return download_hls_parallel(target_url, candidate, output_dir, on_event=on_event)
 
@@ -6339,7 +6233,7 @@ def direct_media_parallel_proxy_url(url, headers, total, workers=None, part_size
         thread.join(timeout=2)
 
 
-def download_direct_media_parallel(url, output_path, headers, total, on_event=None, part_size=None, workers=None, slow_check=None):
+def download_direct_media_parallel(url, output_path, headers, total, on_event=None, part_size=None, workers=None):
     worker_count = max(1, safe_int(workers or DIRECT_MEDIA_PARALLEL_WORKERS))
     part_path = output_path.with_name(output_path.name + ".part")
     resolved_part_size = max(
@@ -6351,22 +6245,12 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
     progress_lock = threading.Lock()
     started_at = time.monotonic()
     last_progress = {"value": 0.0, "bytes": 0}
-    abort_event = threading.Event()
-
     def report(delta):
         nonlocal downloaded
         now = time.monotonic()
         with downloaded_lock:
             downloaded += delta
             current = downloaded
-        if abort_event.is_set():
-            raise ChzzkDirectSlowFallback("CHZZK direct download aborted for HLS fallback")
-        if slow_check:
-            try:
-                slow_check(current, now - started_at)
-            except ChzzkDirectSlowFallback:
-                abort_event.set()
-                raise
         with progress_lock:
             if now - last_progress["value"] >= 0.25 or current >= total:
                 emit_direct_download_progress(
@@ -6400,8 +6284,6 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
                     if mode == "ab":
                         report(existing_size)
                     while True:
-                        if abort_event.is_set():
-                            raise ChzzkDirectSlowFallback("CHZZK direct download aborted for HLS fallback")
                         chunk = response.read(1024 * 512)
                         if not chunk:
                             break
@@ -6442,8 +6324,6 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
                         raise DirectMediaRangeUnsupported("Direct media range request was not honored.")
                     with segment_path.open("wb") as file:
                         while True:
-                            if abort_event.is_set():
-                                raise ChzzkDirectSlowFallback("CHZZK direct download aborted for HLS fallback")
                             chunk = response.read(1024 * 512)
                             if not chunk:
                                 break
@@ -6468,11 +6348,6 @@ def download_direct_media_parallel(url, output_path, headers, total, on_event=No
                 with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
                     completed = sorted(executor.map(download_range, ranges), key=lambda item: item[0])
                 break
-            except ChzzkDirectSlowFallback:
-                abort_event.set()
-                if part_path.exists():
-                    part_path.unlink()
-                raise
             except DirectMediaTotalChanged as exc:
                 if attempt == 0 and exc.actual_total and exc.actual_total != planned_total:
                     emit_event(
@@ -6504,7 +6379,7 @@ def resolve_direct_media_total(url, headers, candidate):
     return probed or estimated
 
 
-def download_direct_media(url, candidate, output_dir, on_event=None, slow_check=None):
+def download_direct_media(url, candidate, output_dir, on_event=None):
     output_dir = Path(output_dir).expanduser()
     output_path = final_output_path_for_candidate(candidate, output_dir)
     if output_path is None:
@@ -6543,21 +6418,12 @@ def download_direct_media(url, candidate, output_dir, on_event=None, slow_check=
                 on_event=on_event,
                 part_size=part_size,
                 workers=worker_count,
-                slow_check=slow_check,
             )
-        except ChzzkDirectSlowFallback:
-            raise
         except DirectMediaRangeUnsupported:
             emit_event(on_event, "status", message="Range download unsupported; retrying direct download")
             part_path = download_direct_media_single(url, output_path, headers, total=total, on_event=on_event)
     else:
-        try:
-            part_path = download_direct_media_single(url, output_path, headers, total=total, on_event=on_event)
-        except ChzzkDirectSlowFallback:
-            part_path = output_path.with_name(output_path.name + ".part")
-            if part_path.exists():
-                part_path.unlink()
-            raise
+        part_path = download_direct_media_single(url, output_path, headers, total=total, on_event=on_event)
     part_path.replace(output_path)
     emit_event(on_event, "file", path=str(output_path))
     emit_event(on_event, "done", path=str(output_dir))

@@ -3633,6 +3633,17 @@ for line in sys.stdin:
             ],
         )
 
+    def test_chzzk_pick_hls_probe_segments_keeps_last_segment_with_default_count(self):
+        segment_urls = [f"https://cdn.example.test/seg-{index}.ts" for index in range(10)]
+        self.assertEqual(
+            engine.chzzk_pick_hls_probe_segments(segment_urls, max_count=3),
+            [
+                "https://cdn.example.test/seg-0.ts",
+                "https://cdn.example.test/seg-5.ts",
+                "https://cdn.example.test/seg-9.ts",
+            ],
+        )
+
     def test_chzzk_hls_route_profile_reuses_playlist_segments_for_probe(self):
         captured = {}
         original_resolve = engine.resolve_hls_media_playlist
@@ -3660,11 +3671,10 @@ for line in sys.stdin:
         self.assertEqual(profile["segment_count"], 10)
         self.assertEqual(captured["segment_urls"], [f"https://cdn.example.test/seg-{index}.ts" for index in range(10)])
 
-    def test_download_chzzk_direct_route_uses_slow_fallback_wrapper(self):
+    def test_download_chzzk_direct_route_starts_direct_download(self):
         calls = []
         original_choose = engine.chzzk_choose_download_route
         original_pair = engine.chzzk_paired_route_candidates
-        original_wrapper = getattr(engine, "chzzk_download_direct_with_hls_fallback", None)
         original_direct = engine.download_direct_media
         original_total = engine.resolve_direct_media_total
 
@@ -3691,14 +3701,10 @@ for line in sys.stdin:
             del hls_cand, total, duration, on_event
             return "direct", direct_candidate
 
-        def fake_wrapper(direct_url, direct_candidate, output_dir, page_url, cookie_source, hls_candidate=None, on_event=None):
-            del direct_candidate, output_dir, page_url, cookie_source, on_event
-            calls.append((direct_url, hls_candidate["url"] if hls_candidate else None))
+        def fake_direct(direct_url, direct_candidate, output_dir, on_event=None):
+            del direct_candidate, output_dir, on_event
+            calls.append(direct_url)
             return {"ok": True, "target_url": direct_url}
-
-        def fake_direct(*args, **kwargs):
-            del args, kwargs
-            raise AssertionError("CHZZK direct route should use the slow-fallback wrapper")
 
         def fake_total(url, headers, cand):
             del url, headers, cand
@@ -3707,7 +3713,6 @@ for line in sys.stdin:
         try:
             engine.chzzk_paired_route_candidates = fake_pair
             engine.chzzk_choose_download_route = fake_choose
-            engine.chzzk_download_direct_with_hls_fallback = fake_wrapper
             engine.download_direct_media = fake_direct
             engine.resolve_direct_media_total = fake_total
             with tempfile.TemporaryDirectory() as temp:
@@ -3719,14 +3724,10 @@ for line in sys.stdin:
         finally:
             engine.chzzk_choose_download_route = original_choose
             engine.chzzk_paired_route_candidates = original_pair
-            if original_wrapper is None:
-                delattr(engine, "chzzk_download_direct_with_hls_fallback")
-            else:
-                engine.chzzk_download_direct_with_hls_fallback = original_wrapper
             engine.download_direct_media = original_direct
             engine.resolve_direct_media_total = original_total
 
-        self.assertEqual(calls, [("https://cdn.example.test/vod.mp4", "https://cdn.example.test/vod.m3u8")])
+        self.assertEqual(calls, ["https://cdn.example.test/vod.mp4"])
 
     def test_download_candidate_uses_direct_http_for_chzzk_mp4_candidates(self):
         calls = []
@@ -3736,8 +3737,7 @@ for line in sys.stdin:
             def __init__(self, options):
                 raise AssertionError("yt-dlp should not run for CHZZK direct MP4 candidates")
 
-        def fake_direct(url, candidate, output_dir, on_event=None, slow_check=None):
-            del slow_check
+        def fake_direct(url, candidate, output_dir, on_event=None):
             calls.append((url, candidate["title"], output_dir))
             output_path = Path(output_dir) / "독케익 - Clip.mp4"
             output_path.write_bytes(b"video")
